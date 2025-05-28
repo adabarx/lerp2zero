@@ -1,3 +1,4 @@
+use core::f32;
 use nih_plug::prelude::*;
 use std::sync::Arc;
 
@@ -7,6 +8,22 @@ use std::sync::Arc;
 
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
+    decay_rate: f32,
+    db_reduction: f32,
+}
+
+enum Ratio {
+    One,
+    Sqrt2,
+    Two,
+    Three,
+    Four,
+    Six,
+    Eight,
+    Twelve,
+    Sixteen,
+    Twentyfour,
+    Infinite,
 }
 
 #[derive(Params)]
@@ -15,14 +32,22 @@ struct Limit2zeroParams {
     /// these IDs remain constant, you can rename and reorder these fields as you wish. The
     /// parameters are exposed to the host in the same order they were defined. In this case, this
     /// gain parameter is stored as linear gain while the values are displayed in decibels.
-    #[id = "gain"]
-    pub gain: FloatParam,
+    #[id = "input"]
+    pub input: FloatParam,
+
+    #[id = "release"]
+    pub release: FloatParam,
+
+    #[id = "limit2"]
+    pub limit2: FloatParam,
 }
 
 impl Default for Limit2zero {
     fn default() -> Self {
         Self {
             params: Arc::new(Limit2zeroParams::default()),
+            db_reduction: 0.0, // db
+            decay_rate: 0.0,
         }
     }
 }
@@ -33,8 +58,8 @@ impl Default for Limit2zeroParams {
             // This gain is stored as linear gain. NIH-plug comes with useful conversion functions
             // to treat these kinds of parameters as if we were dealing with decibels. Storing this
             // as decibels is easier to work with, but requires a conversion for every sample.
-            gain: FloatParam::new(
-                "Gain",
+            input: FloatParam::new(
+                "Input",
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
                     min: util::db_to_gain(-30.0),
@@ -52,6 +77,30 @@ impl Default for Limit2zeroParams {
             // decibels instead of as a linear gain value, we could have also used the
             // `.with_step_size(0.1)` function to get internal rounding.
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+            release: FloatParam::new(
+                "Release",
+                100.0,
+                FloatRange::Skewed {
+                    min: 1.0,
+                    max: 5000.,
+                    factor: 0.301,
+                },
+            )
+            .with_unit("ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            limit2: FloatParam::new(
+                "limit2",
+                util::db_to_gain(0.0),
+                FloatRange::Linear {
+                    min: util::db_to_gain(-1.0),
+                    max: util::db_to_gain(0.0),
+                },
+            )
+            .with_unit("db")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(3))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
         }
     }
@@ -79,7 +128,6 @@ impl Plugin for Limit2zero {
         // only one input and output channel would be called 'Mono'.
         names: PortNames::const_default(),
     }];
-
 
     const MIDI_INPUT: MidiConfig = MidiConfig::None;
     const MIDI_OUTPUT: MidiConfig = MidiConfig::None;
@@ -120,14 +168,27 @@ impl Plugin for Limit2zero {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
             // Smoothing is optionally built into the parameters themselves
-            let gain = self.params.gain.smoothed.next();
+            let input = self.params.input.smoothed.next();
+            let sample_rate = context.transport().sample_rate;
+            let release_sec = self.params.release.value() / 1000.0;
+            let decay_factor = (release_sec * sample_rate).recip();
+            let limit2 = self.params.limit2.value();
 
             for sample in channel_samples {
-                *sample *= gain;
+                *sample *= input;
+
+                if sample.abs() * util::db_to_gain_fast(self.db_reduction) > limit2 {
+                    self.db_reduction = util::gain_to_db_fast(limit2 / sample.abs());
+                    self.decay_rate = (self.db_reduction * decay_factor).abs();
+                } else {
+                    self.db_reduction = f32::min(self.db_reduction + self.decay_rate, 0.0);
+                }
+
+                *sample *= util::db_to_gain_fast(self.db_reduction);
             }
         }
 
