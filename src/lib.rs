@@ -11,8 +11,8 @@ struct Limit2zero {
     sample_rate: f32,
     release_len: f32,
     hold_len: f32,
-    targ_reduction: f32,
-    curr_reduction: f32,
+    reduction: f32,
+    envelope: f32,
     release_elapsed: f32,
     hold_elapsed: f32,
 }
@@ -58,8 +58,8 @@ impl Default for Limit2zero {
         Self {
             params: Arc::new(Limit2zeroParams::default()),
             sample_rate: 44100.0,
-            targ_reduction: 0.0, // db
-            curr_reduction: 0.0,
+            reduction: 0.0, // db
+            envelope: 0.0,
             release_len: 0.0,
             hold_len: 0.0,
             release_elapsed: f32::MAX,
@@ -115,7 +115,7 @@ impl Default for Limit2zeroParams {
                 "Release",
                 100.0,
                 FloatRange::Skewed {
-                    min: 1.0,
+                    min: 0.0,
                     max: 5000.,
                     factor: 0.301,
                 },
@@ -212,32 +212,37 @@ impl Plugin for Limit2zero {
                 *sample *= input;
                 let sample_db = util::gain_to_db_fast(sample.abs());
 
-                if sample_db + self.curr_reduction > 0.0 {
-                    self.targ_reduction = -1.0 * sample_db;
-                    self.curr_reduction = self.targ_reduction;
-                    self.hold_elapsed = 0.0
+                if sample_db + self.envelope > 0.0 {
+                    self.reduction = -1.0 * sample_db;
+                    self.envelope = self.reduction;
+                    self.hold_elapsed = 0.0;
+                    *sample *= util::db_to_gain_fast(self.envelope + limit2);
+                    continue;
                 }
 
-                if self.hold_elapsed > self.hold_len || self.hold_len < 1.0 {
-                    if self.release_len < 1.0 {
-                        if sample_db < 0.0 {
-                            self.curr_reduction = 0.0;
-                        }
-                    } else {
-                        if sample_db < 0.0 && self.release_elapsed <= self.release_len {
-                            let t =
-                                f32::min(self.release_elapsed, self.release_len) / self.release_len;
-                            self.curr_reduction = lerp(self.targ_reduction, 0.0, t);
-                            self.release_elapsed += 1.0;
-                        } else if self.release_elapsed > self.release_len {
-                            self.curr_reduction = 0.0;
-                        }
-                    }
-                } else {
+                if self.hold_len >= 1.0 && self.hold_elapsed <= self.hold_len {
                     self.hold_elapsed += 1.0;
+
+                    *sample *= util::db_to_gain_fast(self.envelope + limit2);
+                    continue;
                 }
 
-                *sample *= util::db_to_gain_fast(self.curr_reduction + limit2);
+                if self.release_len < 1.0 && sample_db < 0.0 {
+                    // clip falling edge
+                    self.envelope = 0.0;
+
+                    *sample *= util::db_to_gain_fast(self.envelope + limit2);
+                    continue;
+                }
+
+                if self.release_elapsed <= self.release_len {
+                    let t = f32::min(self.release_elapsed, self.release_len) / self.release_len;
+                    self.envelope = lerp(self.reduction, 0.0, t);
+                    self.release_elapsed += 1.0;
+                } else {
+                    self.envelope = 0.0;
+                }
+                *sample *= util::db_to_gain_fast(self.envelope + limit2);
             }
         }
 
