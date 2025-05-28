@@ -8,23 +8,29 @@ use std::sync::Arc;
 
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
-    decay_rate: f32,
-    db_reduction: f32,
+    sample_rate: f32,
+    decay_length: f32,
+    attack_length: f32,
+    targ_reduction: f32,
+    curr_reduction: f32,
+    prev_reduction: f32,
+    decay_elapsed: f32,
+    attack_elapsed: f32,
 }
 
-enum Ratio {
-    One,
-    Sqrt2,
-    Two,
-    Three,
-    Four,
-    Six,
-    Eight,
-    Twelve,
-    Sixteen,
-    Twentyfour,
-    Infinite,
-}
+// enum Ratio {
+//     One,
+//     Sqrt2,
+//     Two,
+//     Three,
+//     Four,
+//     Six,
+//     Eight,
+//     Twelve,
+//     Sixteen,
+//     Twentyfour,
+//     Infinite,
+// }
 
 #[derive(Params)]
 struct Limit2zeroParams {
@@ -34,6 +40,12 @@ struct Limit2zeroParams {
     /// gain parameter is stored as linear gain while the values are displayed in decibels.
     #[id = "input"]
     pub input: FloatParam,
+
+    #[id = "attack"]
+    pub attack: FloatParam,
+
+    #[id = "lookahead"]
+    pub lookahead: FloatParam,
 
     #[id = "release"]
     pub release: FloatParam,
@@ -46,8 +58,14 @@ impl Default for Limit2zero {
     fn default() -> Self {
         Self {
             params: Arc::new(Limit2zeroParams::default()),
-            db_reduction: 0.0, // db
-            decay_rate: 0.0,
+            sample_rate: 44100.0,
+            targ_reduction: 0.0, // db
+            curr_reduction: 0.0,
+            prev_reduction: 0.0,
+            decay_length: 0.0,
+            attack_length: 0.0,
+            decay_elapsed: f32::MAX,
+            attack_elapsed: f32::MAX,
         }
     }
 }
@@ -79,6 +97,22 @@ impl Default for Limit2zeroParams {
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
+            attack: FloatParam::new(
+                "Attack",
+                25.0,
+                FloatRange::Skewed {
+                    min: 0.0,
+                    max: 100.,
+                    factor: 0.5,
+                },
+            )
+            .with_unit("ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            lookahead: FloatParam::new("Lookahead", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit("%")
+                .with_value_to_string(formatters::v2s_f32_percentage(0)),
+
             release: FloatParam::new(
                 "Release",
                 100.0,
@@ -93,15 +127,14 @@ impl Default for Limit2zeroParams {
 
             limit2: FloatParam::new(
                 "limit2",
-                util::db_to_gain(0.0),
+                0.0,
                 FloatRange::Linear {
-                    min: util::db_to_gain(-1.0),
-                    max: util::db_to_gain(0.0),
+                    min: -1.0,
+                    max: 0.0,
                 },
             )
             .with_unit("db")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(3))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
         }
     }
 }
@@ -150,12 +183,10 @@ impl Plugin for Limit2zero {
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        // Resize buffers and perform other potentially expensive initialization operations here.
-        // The `reset()` function is always called right after this function. You can remove this
-        // function if you do not need it.
+        self.sample_rate = buffer_config.sample_rate;
         true
     }
 
@@ -168,32 +199,60 @@ impl Plugin for Limit2zero {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        context: &mut impl ProcessContext<Self>,
+        _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
-            // Smoothing is optionally built into the parameters themselves
             let input = self.params.input.smoothed.next();
-            let sample_rate = context.transport().sample_rate;
-            let release_sec = self.params.release.value() / 1000.0;
-            let decay_factor = (release_sec * sample_rate).recip();
-            let limit2 = self.params.limit2.value();
+            let limit2 = self.params.limit2.smoothed.next();
+
+            let release_sec = self.params.release.smoothed.next() * 0.001;
+            let attack_sec = self.params.attack.smoothed.next() * 0.001;
+            self.decay_length = release_sec * self.sample_rate;
+            self.attack_length = attack_sec * self.sample_rate;
 
             for sample in channel_samples {
                 *sample *= input;
+                let sample_db = util::gain_to_db_fast(sample.abs());
 
-                if sample.abs() * util::db_to_gain_fast(self.db_reduction) > limit2 {
-                    self.db_reduction = util::gain_to_db_fast(limit2 / sample.abs());
-                    self.decay_rate = (self.db_reduction * decay_factor).abs();
-                } else {
-                    self.db_reduction = f32::min(self.db_reduction + self.decay_rate, 0.0);
+                if sample_db + self.curr_reduction > limit2 {
+                    self.prev_reduction = self.curr_reduction;
+                    self.attack_elapsed = 0.0;
+                    self.decay_elapsed = 0.0;
                 }
 
-                *sample *= util::db_to_gain_fast(self.db_reduction);
+                if sample_db > limit2 {
+                    self.targ_reduction = util::gain_to_db_fast(limit2 / sample.abs());
+                    let t = if self.attack_length < 1.0 {
+                        1.0
+                    } else {
+                        self.attack_elapsed / self.attack_length
+                    };
+                    self.curr_reduction = lerp(self.prev_reduction, self.targ_reduction, t);
+                    self.attack_elapsed += 1.0;
+                } else if sample_db < limit2 && self.decay_elapsed <= self.decay_length {
+                    let t = if self.decay_length < 1.0 {
+                        1.0
+                    } else {
+                        self.decay_elapsed / self.decay_length
+                    };
+                    self.curr_reduction = lerp(self.targ_reduction, 0.0, t);
+                    self.decay_elapsed += 1.0;
+                } else if self.decay_elapsed > self.decay_length && self.prev_reduction != 0.0 {
+                    self.prev_reduction = 0.0;
+                    self.curr_reduction = 0.0;
+                }
+
+                *sample *= util::db_to_gain_fast(self.curr_reduction);
             }
         }
 
         ProcessStatus::Normal
     }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    let t = f32::clamp(t, 0.0, 1.0);
+    a + (b - a) * t
 }
 
 impl ClapPlugin for Limit2zero {
