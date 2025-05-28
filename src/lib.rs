@@ -97,11 +97,11 @@ impl Default for Limit2zeroParams {
 
             hold: FloatParam::new(
                 "Hold",
-                25.0,
+                100.0,
                 FloatRange::Skewed {
                     min: 0.0,
-                    max: 100.,
-                    factor: 0.5,
+                    max: 1000.,
+                    factor: 0.25,
                 },
             )
             .with_unit("ms")
@@ -220,28 +220,24 @@ impl Plugin for Limit2zero {
                     continue;
                 }
 
-                if self.hold_len >= 1.0 && self.hold_elapsed <= self.hold_len {
+                if self.hold_len > 1.0 && self.hold_elapsed < self.hold_len {
                     self.hold_elapsed += 1.0;
 
                     *sample *= util::db_to_gain_fast(self.envelope + limit2);
                     continue;
                 }
 
-                if self.release_len < 1.0 && sample_db < 0.0 {
-                    // clip falling edge
-                    self.envelope = 0.0;
+                if self.release_len > 1.0 && self.release_elapsed < self.release_len {
+                    let t = self.release_elapsed / self.release_len;
+                    self.envelope = lerp(self.reduction, 0.0, t);
+                    self.release_elapsed += 1.0;
 
                     *sample *= util::db_to_gain_fast(self.envelope + limit2);
                     continue;
                 }
 
-                if self.release_elapsed <= self.release_len {
-                    let t = f32::min(self.release_elapsed, self.release_len) / self.release_len;
-                    self.envelope = lerp(self.reduction, 0.0, t);
-                    self.release_elapsed += 1.0;
-                } else {
-                    self.envelope = 0.0;
-                }
+                self.envelope = 0.0;
+
                 *sample *= util::db_to_gain_fast(self.envelope + limit2);
             }
         }
