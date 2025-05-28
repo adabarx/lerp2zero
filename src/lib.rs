@@ -9,8 +9,6 @@ use std::sync::Arc;
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
     sample_rate: f32,
-    release_len: f32,
-    hold_len: f32,
     reduction: f32,
     envelope: f32,
     release_elapsed: f32,
@@ -60,8 +58,6 @@ impl Default for Limit2zero {
             sample_rate: 44100.0,
             reduction: 0.0, // db
             envelope: 0.0,
-            release_len: 0.0,
-            hold_len: 0.0,
             release_elapsed: f32::MAX,
             hold_elapsed: f32::MAX,
         }
@@ -200,50 +196,70 @@ impl Plugin for Limit2zero {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
-            let input = self.params.input.smoothed.next();
-            let limit2 = self.params.limit2.smoothed.next();
-
-            let release_sec = self.params.release.smoothed.next() * 0.001;
-            let hold_sec = self.params.hold.smoothed.next() * 0.001;
-            self.release_len = release_sec * self.sample_rate;
-            self.hold_len = hold_sec * self.sample_rate;
-
             for sample in channel_samples {
+                let input = self.params.input.smoothed.next();
+                let limit2 = self.params.limit2.smoothed.next();
+                let release_sec = self.params.release.smoothed.next() * 0.001;
+                let hold_sec = self.params.hold.smoothed.next() * 0.001;
+
+                let release_len = (release_sec * self.sample_rate).round();
+                let hold_len = (hold_sec * self.sample_rate).round();
+
                 *sample *= input;
+
+                if hold_len < 1.0 && release_len < 1.0 {
+                    if sample.abs() > 1.0 {
+                        *sample /= sample.abs();
+                    }
+                    *sample *= util::db_to_gain_fast(limit2);
+                    continue;
+                }
+
                 let sample_db = util::gain_to_db_fast(sample.abs());
 
                 if sample_db + self.envelope > 0.0 {
                     self.reduction = -1.0 * sample_db;
                     self.envelope = self.reduction;
                     self.hold_elapsed = 0.0;
+                    self.release_elapsed = 0.0;
                     *sample *= util::db_to_gain_fast(self.envelope + limit2);
+                    *sample = clip(*sample, util::db_to_gain_fast(limit2));
                     continue;
                 }
 
-                if self.hold_len > 1.0 && self.hold_elapsed < self.hold_len {
+                if hold_len > 1.0 && self.hold_elapsed < hold_len {
                     self.hold_elapsed += 1.0;
-
                     *sample *= util::db_to_gain_fast(self.envelope + limit2);
+                    *sample = clip(*sample, util::db_to_gain_fast(limit2));
                     continue;
                 }
 
-                if self.release_len > 1.0 && self.release_elapsed < self.release_len {
-                    let t = self.release_elapsed / self.release_len;
-                    self.envelope = lerp(self.reduction, 0.0, t);
+                if release_len > 1.0 && self.release_elapsed < release_len {
                     self.release_elapsed += 1.0;
+                    let t = (self.release_elapsed / release_len).clamp(0.0, 1.0);
+                    self.envelope = lerp(self.reduction, 0.0, t);
 
                     *sample *= util::db_to_gain_fast(self.envelope + limit2);
+                    *sample = clip(*sample, util::db_to_gain_fast(limit2));
                     continue;
                 }
 
                 self.envelope = 0.0;
 
                 *sample *= util::db_to_gain_fast(self.envelope + limit2);
+                *sample = clip(*sample, util::db_to_gain_fast(limit2));
             }
         }
 
         ProcessStatus::Normal
     }
+}
+
+fn clip(sample: f32, threshold_gain: f32) -> f32 {
+    if sample.abs() > threshold_gain {
+        return sample / (sample.abs() / threshold_gain);
+    }
+    sample
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
