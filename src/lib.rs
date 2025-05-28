@@ -9,13 +9,12 @@ use std::sync::Arc;
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
     sample_rate: f32,
-    decay_length: f32,
-    attack_length: f32,
+    release_len: f32,
+    hold_len: f32,
     targ_reduction: f32,
     curr_reduction: f32,
-    prev_reduction: f32,
-    decay_elapsed: f32,
-    attack_elapsed: f32,
+    release_elapsed: f32,
+    hold_elapsed: f32,
 }
 
 // enum Ratio {
@@ -41,8 +40,8 @@ struct Limit2zeroParams {
     #[id = "input"]
     pub input: FloatParam,
 
-    #[id = "attack"]
-    pub attack: FloatParam,
+    #[id = "hold"]
+    pub hold: FloatParam,
 
     #[id = "lookahead"]
     pub lookahead: FloatParam,
@@ -61,11 +60,10 @@ impl Default for Limit2zero {
             sample_rate: 44100.0,
             targ_reduction: 0.0, // db
             curr_reduction: 0.0,
-            prev_reduction: 0.0,
-            decay_length: 0.0,
-            attack_length: 0.0,
-            decay_elapsed: f32::MAX,
-            attack_elapsed: f32::MAX,
+            release_len: 0.0,
+            hold_len: 0.0,
+            release_elapsed: f32::MAX,
+            hold_elapsed: f32::MAX,
         }
     }
 }
@@ -97,8 +95,8 @@ impl Default for Limit2zeroParams {
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-            attack: FloatParam::new(
-                "Attack",
+            hold: FloatParam::new(
+                "Hold",
                 25.0,
                 FloatRange::Skewed {
                     min: 0.0,
@@ -206,43 +204,40 @@ impl Plugin for Limit2zero {
             let limit2 = self.params.limit2.smoothed.next();
 
             let release_sec = self.params.release.smoothed.next() * 0.001;
-            let attack_sec = self.params.attack.smoothed.next() * 0.001;
-            self.decay_length = release_sec * self.sample_rate;
-            self.attack_length = attack_sec * self.sample_rate;
+            let hold_sec = self.params.hold.smoothed.next() * 0.001;
+            self.release_len = release_sec * self.sample_rate;
+            self.hold_len = hold_sec * self.sample_rate;
 
             for sample in channel_samples {
                 *sample *= input;
                 let sample_db = util::gain_to_db_fast(sample.abs());
 
-                if sample_db + self.curr_reduction > limit2 {
-                    self.prev_reduction = self.curr_reduction;
-                    self.attack_elapsed = 0.0;
-                    self.decay_elapsed = 0.0;
+                if sample_db + self.curr_reduction > 0.0 {
+                    self.targ_reduction = -1.0 * sample_db;
+                    self.curr_reduction = self.targ_reduction;
+                    self.hold_elapsed = 0.0
                 }
 
-                if sample_db > limit2 {
-                    self.targ_reduction = util::gain_to_db_fast(limit2 / sample.abs());
-                    let t = if self.attack_length < 1.0 {
-                        1.0
+                if self.hold_elapsed > self.hold_len || self.hold_len < 1.0 {
+                    if self.release_len < 1.0 {
+                        if sample_db < 0.0 {
+                            self.curr_reduction = 0.0;
+                        }
                     } else {
-                        self.attack_elapsed / self.attack_length
-                    };
-                    self.curr_reduction = lerp(self.prev_reduction, self.targ_reduction, t);
-                    self.attack_elapsed += 1.0;
-                } else if sample_db < limit2 && self.decay_elapsed <= self.decay_length {
-                    let t = if self.decay_length < 1.0 {
-                        1.0
-                    } else {
-                        self.decay_elapsed / self.decay_length
-                    };
-                    self.curr_reduction = lerp(self.targ_reduction, 0.0, t);
-                    self.decay_elapsed += 1.0;
-                } else if self.decay_elapsed > self.decay_length && self.prev_reduction != 0.0 {
-                    self.prev_reduction = 0.0;
-                    self.curr_reduction = 0.0;
+                        if sample_db < 0.0 && self.release_elapsed <= self.release_len {
+                            let t =
+                                f32::min(self.release_elapsed, self.release_len) / self.release_len;
+                            self.curr_reduction = lerp(self.targ_reduction, 0.0, t);
+                            self.release_elapsed += 1.0;
+                        } else if self.release_elapsed > self.release_len {
+                            self.curr_reduction = 0.0;
+                        }
+                    }
+                } else {
+                    self.hold_elapsed += 1.0;
                 }
 
-                *sample *= util::db_to_gain_fast(self.curr_reduction);
+                *sample *= util::db_to_gain_fast(self.curr_reduction + limit2);
             }
         }
 
