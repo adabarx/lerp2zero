@@ -9,10 +9,17 @@ use std::sync::Arc;
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
     sample_rate: f32,
-    reduction: f32,
+    target: f32,
     envelope: f32,
-    release_elapsed: f32,
-    hold_elapsed: f32,
+    env_state: EnvState,
+}
+
+#[derive(Default, Debug, PartialEq)]
+enum EnvState {
+    Hold(f32),
+    Release(f32),
+    #[default]
+    Off,
 }
 
 // enum Ratio {
@@ -56,10 +63,9 @@ impl Default for Limit2zero {
         Self {
             params: Arc::new(Limit2zeroParams::default()),
             sample_rate: 44100.0,
-            reduction: 0.0, // db
+            target: 0.0, // db
             envelope: 0.0,
-            release_elapsed: f32::MAX,
-            hold_elapsed: f32::MAX,
+            env_state: EnvState::Off,
         }
     }
 }
@@ -202,52 +208,75 @@ impl Plugin for Limit2zero {
                 let release_sec = self.params.release.smoothed.next() * 0.001;
                 let hold_sec = self.params.hold.smoothed.next() * 0.001;
 
-                let release_len = (release_sec * self.sample_rate).round();
-                let hold_len = (hold_sec * self.sample_rate).round();
+                let release_len = release_sec * self.sample_rate;
+                let hold_len = hold_sec * self.sample_rate;
 
                 *sample *= input;
 
-                if hold_len < 1.0 && release_len < 1.0 {
-                    if sample.abs() > 1.0 {
-                        *sample /= sample.abs();
-                    }
-                    *sample *= util::db_to_gain_fast(limit2);
-                    continue;
-                }
-
                 let sample_db = util::gain_to_db_fast(sample.abs());
 
-                if sample_db + self.envelope > 0.0 {
-                    self.reduction = -1.0 * sample_db;
-                    self.envelope = self.reduction;
-                    self.hold_elapsed = 0.0;
-                    self.release_elapsed = 0.0;
-                    *sample *= util::db_to_gain_fast(self.envelope + limit2);
-                    *sample = clip(*sample, util::db_to_gain_fast(limit2));
-                    continue;
+                match &mut self.env_state {
+                    EnvState::Off if sample_db > 0.0 => {
+                        self.target = -1.0 * sample_db;
+                        self.envelope = self.target;
+                        if hold_len.round() >= 1.0 {
+                            self.env_state = EnvState::Hold(0.0);
+                        } else if release_len.round() >= 2.0 {
+                            self.env_state = EnvState::Release(0.0);
+                        } else {
+                            self.env_state = EnvState::Off;
+                        }
+                    }
+                    EnvState::Hold(_) if sample_db + self.envelope > 0.0 => {
+                        self.target = -1.0 * sample_db;
+                        self.envelope = self.target;
+                        if hold_len.round() >= 1.0 {
+                            self.env_state = EnvState::Hold(0.0);
+                        } else if release_len.round() >= 1.0 {
+                            self.env_state = EnvState::Release(0.0);
+                        } else {
+                            self.env_state = EnvState::Off;
+                        }
+                    }
+                    EnvState::Hold(elapsed) => {
+                        *elapsed += 1.0;
+                        if *elapsed >= hold_len {
+                            if release_len.round() >= 1.0 {
+                                self.env_state = EnvState::Release(0.0);
+                            } else {
+                                self.env_state = EnvState::Off;
+                            }
+                        }
+                    }
+                    EnvState::Release(elapsed) => {
+                        *elapsed += 1.0;
+                        let t = *elapsed / release_len;
+                        self.envelope = lerp(self.target, 0.0, t);
+
+                        if *elapsed >= release_len {
+                            self.env_state = EnvState::Off;
+                        }
+
+                        if sample_db + self.envelope > 0.0 {
+                            self.target = -1.0 * sample_db;
+                            self.envelope = self.target;
+                            if hold_len.round() >= 1.0 {
+                                self.env_state = EnvState::Hold(0.0);
+                            } else if release_len.round() >= 1.0 {
+                                self.env_state = EnvState::Release(0.0);
+                            } else {
+                                self.env_state = EnvState::Off;
+                            }
+                        }
+                    }
+                    EnvState::Off if self.target != 0.0 || self.envelope == 0.0 => {
+                        self.target = 0.0;
+                        self.envelope = 0.0;
+                    }
+                    EnvState::Off => (),
                 }
-
-                if hold_len > 1.0 && self.hold_elapsed < hold_len {
-                    self.hold_elapsed += 1.0;
-                    *sample *= util::db_to_gain_fast(self.envelope + limit2);
-                    *sample = clip(*sample, util::db_to_gain_fast(limit2));
-                    continue;
-                }
-
-                if release_len > 1.0 && self.release_elapsed < release_len {
-                    self.release_elapsed += 1.0;
-                    let t = (self.release_elapsed / release_len).clamp(0.0, 1.0);
-                    self.envelope = lerp(self.reduction, 0.0, t);
-
-                    *sample *= util::db_to_gain_fast(self.envelope + limit2);
-                    *sample = clip(*sample, util::db_to_gain_fast(limit2));
-                    continue;
-                }
-
-                self.envelope = 0.0;
 
                 *sample *= util::db_to_gain_fast(self.envelope + limit2);
-                *sample = clip(*sample, util::db_to_gain_fast(limit2));
             }
         }
 
@@ -255,12 +284,12 @@ impl Plugin for Limit2zero {
     }
 }
 
-fn clip(sample: f32, threshold_gain: f32) -> f32 {
-    if sample.abs() > threshold_gain {
-        return sample / (sample.abs() / threshold_gain);
-    }
-    sample
-}
+// fn c2z(s: f32) -> f32 {
+//     if s.abs() > 1.0 {
+//         return s / s.abs();
+//     }
+//     s
+// }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     let t = f32::clamp(t, 0.0, 1.0);
