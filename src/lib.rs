@@ -31,11 +31,13 @@ struct Easing {
     shape: EaseShape,
 }
 
+#[derive(Enum, Debug, PartialEq)]
 enum EaseDirection {
     In,
     Out,
 }
 
+#[derive(Enum, Debug, PartialEq)]
 enum EaseShape {
     Sine,
     Circle,
@@ -46,6 +48,10 @@ enum EaseShape {
 }
 
 impl Easing {
+    fn new(dir: EaseDirection, shape: EaseShape) -> Self {
+        Self { dir, shape }
+    }
+
     fn calc(&self, t: f32) -> f32 {
         use f32::consts::{PI, TAU};
         use EaseDirection::*;
@@ -133,8 +139,8 @@ struct Limit2zeroParams {
     #[id = "input"]
     pub input: FloatParam,
 
-    #[id = "hold"]
-    pub hold: FloatParam,
+    #[id = "trim"]
+    pub trim: FloatParam,
 
     #[id = "lookahead"]
     pub lookahead: FloatParam,
@@ -142,11 +148,32 @@ struct Limit2zeroParams {
     #[id = "attack"]
     pub attack: FloatParam,
 
+    #[id = "hold"]
+    pub hold: FloatParam,
+
     #[id = "release"]
     pub release: FloatParam,
 
-    #[id = "trim"]
-    pub trim: FloatParam,
+    #[id = "atk_char_amt"]
+    pub atk_char_amt: FloatParam,
+
+    #[id = "atk_shp"]
+    pub atk_shp: EnumParam<EaseShape>,
+
+    #[id = "atk_dir"]
+    pub atk_dir: EnumParam<EaseDirection>,
+
+    #[id = "rel_char_amt"]
+    pub rel_char_amt: FloatParam,
+
+    #[id = "rel_shp"]
+    pub rel_shp: EnumParam<EaseShape>,
+
+    #[id = "rel_dir"]
+    pub rel_dir: EnumParam<EaseDirection>,
+
+    #[id = "c2z"]
+    pub c2z: BoolParam,
 }
 
 impl Default for Limit2zero {
@@ -180,16 +207,15 @@ impl Default for Limit2zeroParams {
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-            hold: FloatParam::new(
-                "Hold",
-                100.0,
-                FloatRange::Skewed {
-                    min: 0.0,
-                    max: 1000.,
-                    factor: 0.25,
+            trim: FloatParam::new(
+                "Trim",
+                0.0,
+                FloatRange::Linear {
+                    min: -1.0,
+                    max: 0.0,
                 },
             )
-            .with_unit("ms")
+            .with_unit("db")
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             lookahead: FloatParam::new(
@@ -216,6 +242,18 @@ impl Default for Limit2zeroParams {
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
+            hold: FloatParam::new(
+                "Hold",
+                100.0,
+                FloatRange::Skewed {
+                    min: 0.0,
+                    max: 1000.,
+                    factor: 0.25,
+                },
+            )
+            .with_unit("ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
             release: FloatParam::new(
                 "Release",
                 100.0,
@@ -228,16 +266,29 @@ impl Default for Limit2zeroParams {
             .with_unit("ms")
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
-            trim: FloatParam::new(
-                "Trim",
+            atk_char_amt: FloatParam::new(
+                "Attack Character",
                 0.0,
-                FloatRange::Linear {
-                    min: -1.0,
-                    max: 0.0,
-                },
+                FloatRange::Linear { min: 0.0, max: 1.0 },
             )
-            .with_unit("db")
-            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            .with_unit("%")
+            .with_value_to_string(formatters::v2s_f32_percentage(0)),
+
+            atk_shp: EnumParam::new("Attack Shape", EaseShape::Sine),
+            atk_dir: EnumParam::new("Attack Shape", EaseDirection::In),
+
+            rel_char_amt: FloatParam::new(
+                "Release Character",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_unit("%")
+            .with_value_to_string(formatters::v2s_f32_percentage(0)),
+
+            rel_shp: EnumParam::new("Release Shape", EaseShape::Sine),
+            rel_dir: EnumParam::new("Release Shape", EaseDirection::In),
+
+            c2z: BoolParam::new("c2z", true),
         }
     }
 }
@@ -306,14 +357,30 @@ impl Plugin for Limit2zero {
                     continue;
                 }
 
-                let attack_amount = self.params.attack.smoothed.next();
-                let input = self.params.input.smoothed.next();
-                let trim = self.params.trim.smoothed.next();
-                let release_sec = self.params.release.smoothed.next() * 0.001;
-                let hold_sec = self.params.hold.smoothed.next() * 0.001;
+                let (input, trim) = (
+                    self.params.input.smoothed.next(),
+                    self.params.trim.smoothed.next(),
+                );
+
+                let (attack_amount, atk_char_amt, atk_shp, atk_dir) = (
+                    self.params.attack.smoothed.next(),
+                    self.params.atk_char_amt.smoothed.next(),
+                    self.params.atk_shp.value(),
+                    self.params.atk_dir.value(),
+                );
+
+                let (release_sec, hold_sec, rel_char_amt, rel_shp, rel_dir) = (
+                    self.params.release.smoothed.next() * 0.001,
+                    self.params.hold.smoothed.next() * 0.001,
+                    self.params.rel_char_amt.smoothed.next(),
+                    self.params.rel_shp.value(),
+                    self.params.rel_dir.value(),
+                );
 
                 let release_len = release_sec * self.sample_rate;
                 let hold_len = hold_sec * self.sample_rate;
+                let atk_easing = Easing::new(atk_dir, atk_shp);
+                let rel_easing = Easing::new(rel_dir, rel_shp);
 
                 self.buffer.push_back(AttackSample {
                     sample: *sample * input,
@@ -335,7 +402,9 @@ impl Plugin for Limit2zero {
                             return rv;
                         }
                         let t = (self.lookahead_len - i as f32) / self.lookahead_len;
-                        let env = lerp(0.0, -1.0 * s.db, t) * attack_amount;
+                        let lerp_env = lerp(0.0, -1.0 * s.db, t);
+                        let ease_env = lerp(0.0, -1.0 * s.db, atk_easing.calc(t));
+                        let env = lerp(lerp_env, ease_env, atk_char_amt) * attack_amount;
                         f32::min(env, rv)
                     });
 
@@ -392,7 +461,9 @@ impl Plugin for Limit2zero {
                     EnvState::Release(elapsed) => {
                         *elapsed += 1.0;
                         let t = *elapsed / release_len;
-                        self.envelope = lerp(self.target, 0.0, t);
+                        let lerp_env = lerp(self.target, 0.0, t);
+                        let ease_env = lerp(self.target, 0.0, rel_easing.calc(t));
+                        self.envelope = lerp(lerp_env, ease_env, rel_char_amt);
 
                         if *elapsed >= release_len {
                             self.env_state = EnvState::Off;
@@ -418,6 +489,10 @@ impl Plugin for Limit2zero {
                 }
 
                 *sample = dly_sample * util::db_to_gain_fast(self.envelope + trim);
+
+                if self.params.c2z.value() {
+                    *sample = c2z(*sample);
+                }
             }
         }
 
@@ -425,12 +500,12 @@ impl Plugin for Limit2zero {
     }
 }
 
-// fn c2z(s: f32) -> f32 {
-//     if s.abs() > 1.0 {
-//         return s / s.abs();
-//     }
-//     s
-// }
+fn c2z(s: f32) -> f32 {
+    if s.abs() > 1.0 {
+        return s / s.abs();
+    }
+    s
+}
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     let t = f32::clamp(t, 0.0, 1.0);
