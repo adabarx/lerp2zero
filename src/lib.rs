@@ -1,6 +1,6 @@
 use core::f32;
 use nih_plug::prelude::*;
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 // This is a shortened version of the gain example with most comments removed, check out
 // https://github.com/robbert-vdh/nih-plug/blob/master/plugins/examples/gain/src/lib.rs to get
@@ -12,6 +12,14 @@ struct Limit2zero {
     target: f32,
     envelope: f32,
     env_state: EnvState,
+    buffer: VecDeque<AttackSample>,
+    lookahead_len: f32,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct AttackSample {
+    sample: f32,
+    db: f32,
 }
 
 #[derive(Default, Debug, PartialEq)]
@@ -66,6 +74,8 @@ impl Default for Limit2zero {
             target: 0.0, // db
             envelope: 0.0,
             env_state: EnvState::Off,
+            buffer: VecDeque::new(),
+            lookahead_len: 0.0,
         }
     }
 }
@@ -109,9 +119,17 @@ impl Default for Limit2zeroParams {
             .with_unit("ms")
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
-            lookahead: FloatParam::new("Lookahead", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_unit("%")
-                .with_value_to_string(formatters::v2s_f32_percentage(0)),
+            lookahead: FloatParam::new(
+                "Lookahead",
+                1.0,
+                FloatRange::Skewed {
+                    min: 0.0,
+                    max: 50.0,
+                    factor: 0.25,
+                },
+            )
+            .with_unit("ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
             release: FloatParam::new(
                 "Release",
@@ -147,8 +165,6 @@ impl Plugin for Limit2zero {
 
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    // The first audio IO layout is used as the default. The other layouts may be selected either
-    // explicitly or automatically by the host or the user depending on the plugin API/backend.
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: NonZeroU32::new(2),
         main_output_channels: NonZeroU32::new(2),
@@ -156,9 +172,6 @@ impl Plugin for Limit2zero {
         aux_input_ports: &[],
         aux_output_ports: &[],
 
-        // Individual ports and the layout as a whole can be named here. By default these names
-        // are generated as needed. This layout will be called 'Stereo', while a layout with
-        // only one input and output channel would be called 'Mono'.
         names: PortNames::const_default(),
     }];
 
@@ -167,13 +180,7 @@ impl Plugin for Limit2zero {
 
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
 
-    // If the plugin can send or receive SysEx messages, it can define a type to wrap around those
-    // messages here. The type implements the `SysExMessage` trait, which allows conversion to and
-    // from plain byte buffers.
     type SysExMessage = ();
-    // More advanced plugins can use this to run expensive background tasks. See the field's
-    // documentation for more information. `()` means that the plugin does not have any background
-    // tasks.
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
@@ -191,18 +198,26 @@ impl Plugin for Limit2zero {
     }
 
     fn reset(&mut self) {
-        // Reset buffers and envelopes here. This can be called from the audio thread and may not
-        // allocate. You can remove this function if you do not need it.
+        self.buffer = VecDeque::with_capacity(self.lookahead_len.ceil() as usize);
     }
 
     fn process(
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
             for sample in channel_samples {
+                let lookahead = self.params.lookahead.value() * self.sample_rate * 0.001;
+
+                if lookahead.ceil() != self.lookahead_len {
+                    context.set_latency_samples((lookahead / 2.0).ceil() as u32);
+                    self.lookahead_len = lookahead.ceil();
+                    self.reset();
+                    continue;
+                }
+
                 let input = self.params.input.smoothed.next();
                 let limit2 = self.params.limit2.smoothed.next();
                 let release_sec = self.params.release.smoothed.next() * 0.001;
@@ -211,24 +226,58 @@ impl Plugin for Limit2zero {
                 let release_len = release_sec * self.sample_rate;
                 let hold_len = hold_sec * self.sample_rate;
 
-                *sample *= input;
+                self.buffer.push_back(AttackSample {
+                    sample: *sample * input,
+                    db: util::gain_to_db_fast(sample.abs() * input),
+                });
 
-                let sample_db = util::gain_to_db_fast(sample.abs());
+                if self.lookahead_len > self.buffer.len() as f32 {
+                    *sample = 0.0;
+                    continue;
+                }
+
+                let atk_env = self
+                    .buffer
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.db > 0.0)
+                    .fold(0.0, |rv, (i, s)| {
+                        let t = (self.lookahead_len - i as f32) / self.lookahead_len;
+                        let env = lerp(0.0, -1.0 * s.db, t);
+                        f32::min(env, rv)
+                    });
+
+                if atk_env < self.envelope {
+                    self.target = atk_env;
+                    self.envelope = atk_env;
+                    if hold_len.round() >= 1.0 {
+                        self.env_state = EnvState::Hold(0.0);
+                    } else if release_len.round() >= 1.0 {
+                        self.env_state = EnvState::Release(0.0);
+                    } else {
+                        self.env_state = EnvState::Off;
+                    }
+                }
+
+                let AttackSample {
+                    sample: dly_sample,
+                    db: delay_db,
+                } = self.buffer.pop_front().unwrap();
 
                 match &mut self.env_state {
-                    EnvState::Off if sample_db > 0.0 => {
-                        self.target = -1.0 * sample_db;
+                    EnvState::Off if delay_db > 0.0 => {
+                        self.target = -1.0 * delay_db;
                         self.envelope = self.target;
                         if hold_len.round() >= 1.0 {
                             self.env_state = EnvState::Hold(0.0);
-                        } else if release_len.round() >= 2.0 {
+                        } else if release_len.round() >= 1.0 {
                             self.env_state = EnvState::Release(0.0);
                         } else {
                             self.env_state = EnvState::Off;
                         }
                     }
-                    EnvState::Hold(_) if sample_db + self.envelope > 0.0 => {
-                        self.target = -1.0 * sample_db;
+                    EnvState::Hold(_) if delay_db + self.envelope > 0.0 => {
+                        self.target = -1.0 * delay_db;
                         self.envelope = self.target;
                         if hold_len.round() >= 1.0 {
                             self.env_state = EnvState::Hold(0.0);
@@ -257,8 +306,8 @@ impl Plugin for Limit2zero {
                             self.env_state = EnvState::Off;
                         }
 
-                        if sample_db + self.envelope > 0.0 {
-                            self.target = -1.0 * sample_db;
+                        if delay_db + self.envelope > 0.0 {
+                            self.target = -1.0 * delay_db;
                             self.envelope = self.target;
                             if hold_len.round() >= 1.0 {
                                 self.env_state = EnvState::Hold(0.0);
@@ -276,7 +325,7 @@ impl Plugin for Limit2zero {
                     EnvState::Off => (),
                 }
 
-                *sample *= util::db_to_gain_fast(self.envelope + limit2);
+                *sample = dly_sample * util::db_to_gain_fast(self.envelope + limit2);
             }
         }
 
