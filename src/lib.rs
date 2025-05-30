@@ -59,6 +59,9 @@ struct Limit2zeroParams {
     #[id = "lookahead"]
     pub lookahead: FloatParam,
 
+    #[id = "attack"]
+    pub attack: FloatParam,
+
     #[id = "release"]
     pub release: FloatParam,
 
@@ -125,11 +128,23 @@ impl Default for Limit2zeroParams {
                 FloatRange::Skewed {
                     min: 0.0,
                     max: 50.0,
-                    factor: 0.25,
+                    factor: 0.375,
                 },
             )
             .with_unit("ms")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            attack: FloatParam::new(
+                "Attack",
+                1.0,
+                FloatRange::Skewed {
+                    min: 0.0,
+                    max: 1.0,
+                    factor: 0.5,
+                },
+            )
+            .with_unit("%")
+            .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
             release: FloatParam::new(
                 "Release",
@@ -218,6 +233,7 @@ impl Plugin for Limit2zero {
                     continue;
                 }
 
+                let attack_amount = self.params.attack.smoothed.next();
                 let input = self.params.input.smoothed.next();
                 let limit2 = self.params.limit2.smoothed.next();
                 let release_sec = self.params.release.smoothed.next() * 0.001;
@@ -243,7 +259,7 @@ impl Plugin for Limit2zero {
                     .filter(|(_, s)| s.db > 0.0)
                     .fold(0.0, |rv, (i, s)| {
                         let t = (self.lookahead_len - i as f32) / self.lookahead_len;
-                        let env = lerp(0.0, -1.0 * s.db, t);
+                        let env = lerp(0.0, -1.0 * s.db, t) * attack_amount;
                         f32::min(env, rv)
                     });
 
