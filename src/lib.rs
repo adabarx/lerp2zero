@@ -26,25 +26,25 @@ enum EnvState {
     Off,
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
 struct Easing {
     dir: EaseDirection,
     shape: EaseShape,
 }
 
-#[derive(Enum, Debug, PartialEq)]
+#[derive(Enum, Debug, PartialEq, Clone, Copy)]
 enum EaseDirection {
     In,
     Out,
 }
 
-#[derive(Enum, Debug, PartialEq)]
+#[derive(Enum, Debug, PartialEq, Clone, Copy)]
 enum EaseShape {
     Sine,
     Circle,
     Exponent,
     OutBack,
     Elastic,
-    Bounce,
 }
 
 impl Easing {
@@ -58,7 +58,7 @@ impl Easing {
         use EaseShape::*;
         match self.dir {
             In => match self.shape {
-                Sine => 1.0 - f32::cos((t * PI) / 2.0),
+                Sine => f32::sin((t * PI) / 2.0),
                 Circle => 1.0 - f32::sqrt(1.0 - t.powi(2)),
                 Exponent => {
                     if t == 0.0 {
@@ -84,53 +84,12 @@ impl Easing {
                         -2_f32.powf(10.0 * t - 10.0) * f32::sin((t * 10.0 - 10.75) * c4)
                     }
                 }
-                Bounce => 1.0 - ease_out_bounce(1.0 - t),
             },
-            Out => match self.shape {
-                Sine => 1.0 - f32::sin((t * PI) / 2.0),
-                Circle => 1.0 - f32::sqrt(1.0 - (t - 1.0).powi(2)),
-                Exponent => {
-                    if t == 1.0 {
-                        1.0
-                    } else {
-                        1.0 - 2_f32.powf(-10.0 * t)
-                    }
-                }
-                OutBack => {
-                    let c1 = 1.70158;
-                    let c3 = c1 + 1.0;
-
-                    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
-                }
-                Elastic => {
-                    let c4 = TAU / 3.0;
-
-                    if t == 0.0 {
-                        0.0
-                    } else if t == 1.0 {
-                        1.0
-                    } else {
-                        2_f32.powf(-10.0 * t) * f32::sin((t * 10.0 - 0.75) * c4) + 1.0
-                    }
-                }
-                Bounce => ease_out_bounce(t),
-            },
+            Out => {
+                let out = Easing::new(EaseDirection::Out, self.shape);
+                1.0 - out.calc(1.0 - t)
+            }
         }
-    }
-}
-
-fn ease_out_bounce(t: f32) -> f32 {
-    let n1 = 7.5625;
-    let d1 = 2.75;
-
-    if t < 1.0 / d1 {
-        n1 * t * t
-    } else if t < 2.0 / d1 {
-        n1 * ((t - 1.5) / d1) * t + 0.75
-    } else if t < 2.5 / d1 {
-        n1 * ((t - 2.25) / d1) * t + 0.9375
-    } else {
-        n1 * ((t - 2.625) / d1) * t + 0.984375
     }
 }
 
@@ -145,8 +104,8 @@ struct Limit2zeroParams {
     #[id = "lookahead"]
     pub lookahead: FloatParam,
 
-    #[id = "attack"]
-    pub attack: FloatParam,
+    #[id = "attack_amt"]
+    pub attack_amt: FloatParam,
 
     #[id = "hold"]
     pub hold: FloatParam,
@@ -155,13 +114,7 @@ struct Limit2zeroParams {
     pub release: FloatParam,
 
     #[id = "atk_char_amt"]
-    pub atk_char_amt: FloatParam,
-
-    #[id = "atk_shp"]
-    pub atk_shp: EnumParam<EaseShape>,
-
-    #[id = "atk_dir"]
-    pub atk_dir: EnumParam<EaseDirection>,
+    pub atk_shape: FloatParam,
 
     #[id = "rel_char_amt"]
     pub rel_char_amt: FloatParam,
@@ -203,7 +156,7 @@ impl Default for Limit2zeroParams {
                 },
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
+            .with_unit("dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
@@ -221,23 +174,18 @@ impl Default for Limit2zeroParams {
             lookahead: FloatParam::new(
                 "Lookahead",
                 1.0,
-                FloatRange::Skewed {
+                FloatRange::Linear {
                     min: 0.0,
                     max: 50.0,
-                    factor: 0.375,
                 },
             )
             .with_unit("ms")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
-            attack: FloatParam::new(
-                "Attack",
+            attack_amt: FloatParam::new(
+                "Attack Amount",
                 1.0,
-                FloatRange::Skewed {
-                    min: 0.0,
-                    max: 1.0,
-                    factor: 0.5,
-                },
+                FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
@@ -266,16 +214,17 @@ impl Default for Limit2zeroParams {
             .with_unit("ms")
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
-            atk_char_amt: FloatParam::new(
-                "Attack Character",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
+            atk_shape: FloatParam::new(
+                "Attack EaseIn/Easeout",
+                1.0,
+                FloatRange::Skewed {
+                    min: 0.25,
+                    max: 4.0,
+                    factor: 0.43,
+                },
             )
-            .with_unit("%")
-            .with_value_to_string(formatters::v2s_f32_percentage(0)),
-
-            atk_shp: EnumParam::new("Attack Shape", EaseShape::Sine),
-            atk_dir: EnumParam::new("Attack Shape", EaseDirection::In),
+            .with_unit(" x^n")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             rel_char_amt: FloatParam::new(
                 "Release Character",
@@ -343,45 +292,35 @@ impl Plugin for Limit2zero {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        let (input, trim) = (self.params.input.value(), self.params.trim.value());
+
+        let (lookahead, attack_amount, atk_shape) = (
+            self.params.lookahead.value() * 0.001 * self.sample_rate,
+            self.params.attack_amt.value(),
+            self.params.atk_shape.value(),
+        );
+
+        let (release, hold, rel_char_amt, rel_shp, rel_dir) = (
+            self.params.release.value() * 0.001 * self.sample_rate,
+            self.params.hold.value() * 0.001 * self.sample_rate,
+            self.params.rel_char_amt.value(),
+            self.params.rel_shp.value(),
+            self.params.rel_dir.value(),
+        );
+
+        let rel_easing = Easing::new(rel_dir, rel_shp);
+
+        if lookahead.ceil() != self.lookahead_len {
+            // in bitwig i have to set half the latency samples?
+            // is it like this in other DAWs?
+            // whyyyyyyyy
+            context.set_latency_samples((lookahead / 2.0).ceil() as u32);
+            self.lookahead_len = lookahead.ceil();
+            self.reset();
+        }
+
         for channel_samples in buffer.iter_samples() {
             for sample in channel_samples {
-                let lookahead = self.params.lookahead.value() * self.sample_rate * 0.001;
-
-                if lookahead.ceil() != self.lookahead_len {
-                    // in bitwig i have to set half the latency samples?
-                    // is it like this in other DAWs?
-                    // whyyyyyyyy
-                    context.set_latency_samples((lookahead / 2.0).ceil() as u32);
-                    self.lookahead_len = lookahead.ceil();
-                    self.reset();
-                    continue;
-                }
-
-                let (input, trim) = (
-                    self.params.input.smoothed.next(),
-                    self.params.trim.smoothed.next(),
-                );
-
-                let (attack_amount, atk_char_amt, atk_shp, atk_dir) = (
-                    self.params.attack.smoothed.next(),
-                    self.params.atk_char_amt.smoothed.next(),
-                    self.params.atk_shp.value(),
-                    self.params.atk_dir.value(),
-                );
-
-                let (release_sec, hold_sec, rel_char_amt, rel_shp, rel_dir) = (
-                    self.params.release.smoothed.next() * 0.001,
-                    self.params.hold.smoothed.next() * 0.001,
-                    self.params.rel_char_amt.smoothed.next(),
-                    self.params.rel_shp.value(),
-                    self.params.rel_dir.value(),
-                );
-
-                let release_len = release_sec * self.sample_rate;
-                let hold_len = hold_sec * self.sample_rate;
-                let atk_easing = Easing::new(atk_dir, atk_shp);
-                let rel_easing = Easing::new(rel_dir, rel_shp);
-
                 self.buffer.push_back(AttackSample {
                     sample: *sample * input,
                     db: util::gain_to_db_fast(sample.abs() * input),
@@ -392,28 +331,32 @@ impl Plugin for Limit2zero {
                     continue;
                 }
 
-                let atk_env = self
+                let (_, i, s) = self
                     .buffer
                     .iter()
                     .enumerate()
                     .filter(|(_, s)| s.db > 0.0)
-                    .fold(0.0, |rv, (i, s)| {
-                        if s.db + rv < 0.0 {
-                            return rv;
-                        }
-                        let t = (self.lookahead_len - i as f32) / self.lookahead_len;
-                        let lerp_env = lerp(0.0, -1.0 * s.db, t);
-                        let ease_env = lerp(0.0, -1.0 * s.db, atk_easing.calc(t));
-                        let env = lerp(lerp_env, ease_env, atk_char_amt) * attack_amount;
-                        f32::min(env, rv)
-                    });
+                    .fold(
+                        (0.0, 0_usize, AttackSample::default()),
+                        |(f, i, s), sample| {
+                            let s_f = (self.lookahead_len - sample.0 as f32).sqrt();
+                            if sample.1.db * s_f as f32 > s.db * f {
+                                (s_f, sample.0, *sample.1)
+                            } else {
+                                (f, i, s)
+                            }
+                        },
+                    );
 
-                if atk_env < self.envelope {
-                    self.target = atk_env;
-                    self.envelope = atk_env;
-                    if hold_len.round() >= 1.0 {
+                let t = (self.lookahead_len - i as f32) / self.lookahead_len;
+                let env = lerp(0.0, -1.0 * s.db, t.powf(atk_shape)) * attack_amount;
+
+                if env < self.envelope {
+                    self.target = env;
+                    self.envelope = env;
+                    if hold.round() >= 1.0 {
                         self.env_state = EnvState::Hold(0.0);
-                    } else if release_len.round() >= 1.0 {
+                    } else if release.round() >= 1.0 {
                         self.env_state = EnvState::Release(0.0);
                     } else {
                         self.env_state = EnvState::Off;
@@ -429,9 +372,9 @@ impl Plugin for Limit2zero {
                     EnvState::Off if delay_db > 0.0 => {
                         self.target = -1.0 * delay_db;
                         self.envelope = self.target;
-                        if hold_len.round() >= 1.0 {
+                        if hold.round() >= 1.0 {
                             self.env_state = EnvState::Hold(0.0);
-                        } else if release_len.round() >= 1.0 {
+                        } else if release.round() >= 1.0 {
                             self.env_state = EnvState::Release(0.0);
                         } else {
                             self.env_state = EnvState::Off;
@@ -440,9 +383,9 @@ impl Plugin for Limit2zero {
                     EnvState::Hold(_) if delay_db + self.envelope > 0.0 => {
                         self.target = -1.0 * delay_db;
                         self.envelope = self.target;
-                        if hold_len.round() >= 1.0 {
+                        if hold.round() >= 1.0 {
                             self.env_state = EnvState::Hold(0.0);
-                        } else if release_len.round() >= 1.0 {
+                        } else if release.round() >= 1.0 {
                             self.env_state = EnvState::Release(0.0);
                         } else {
                             self.env_state = EnvState::Off;
@@ -450,8 +393,8 @@ impl Plugin for Limit2zero {
                     }
                     EnvState::Hold(elapsed) => {
                         *elapsed += 1.0;
-                        if *elapsed >= hold_len {
-                            if release_len.round() >= 1.0 {
+                        if *elapsed >= hold {
+                            if release.round() >= 1.0 {
                                 self.env_state = EnvState::Release(0.0);
                             } else {
                                 self.env_state = EnvState::Off;
@@ -460,21 +403,21 @@ impl Plugin for Limit2zero {
                     }
                     EnvState::Release(elapsed) => {
                         *elapsed += 1.0;
-                        let t = *elapsed / release_len;
+                        let t = *elapsed / release;
                         let lerp_env = lerp(self.target, 0.0, t);
                         let ease_env = lerp(self.target, 0.0, rel_easing.calc(t));
                         self.envelope = lerp(lerp_env, ease_env, rel_char_amt);
 
-                        if *elapsed >= release_len {
+                        if *elapsed >= release {
                             self.env_state = EnvState::Off;
                         }
 
                         if delay_db + self.envelope > 0.0 {
                             self.target = -1.0 * delay_db;
                             self.envelope = self.target;
-                            if hold_len.round() >= 1.0 {
+                            if hold.round() >= 1.0 {
                                 self.env_state = EnvState::Hold(0.0);
-                            } else if release_len.round() >= 1.0 {
+                            } else if release.round() >= 1.0 {
                                 self.env_state = EnvState::Release(0.0);
                             } else {
                                 self.env_state = EnvState::Off;
@@ -508,7 +451,6 @@ fn c2z(s: f32) -> f32 {
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    let t = f32::clamp(t, 0.0, 1.0);
     a + (b - a) * t
 }
 
