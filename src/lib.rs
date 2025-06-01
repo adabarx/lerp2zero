@@ -6,6 +6,7 @@ struct Limit2zero {
     params: Arc<Limit2zeroParams>,
     sample_rate: f32,
     target: f32,
+    hold: f32,
     envelope: f32,
     env_state: EnvState,
     buffer: VecDeque<AttackSample>,
@@ -110,6 +111,9 @@ struct Limit2zeroParams {
     #[id = "hold"]
     pub hold: FloatParam,
 
+    #[id = "hold_amt"]
+    pub hold_amt: FloatParam,
+
     #[id = "release"]
     pub release: FloatParam,
 
@@ -141,6 +145,7 @@ impl Default for Limit2zero {
             params: Arc::new(Limit2zeroParams::default()),
             sample_rate: 44100.0,
             target: 0.0, // db
+            hold: 0.0,   // db
             envelope: 0.0,
             env_state: EnvState::Off,
             buffer: VecDeque::new(),
@@ -207,6 +212,14 @@ impl Default for Limit2zeroParams {
             )
             .with_unit("ms")
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            hold_amt: FloatParam::new(
+                "Hold Amount",
+                1.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_unit("%")
+            .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
             release: FloatParam::new(
                 "Release",
@@ -307,9 +320,10 @@ impl Plugin for Limit2zero {
             self.params.atk_dir.value(),
         );
 
-        let (release, hold, rel_char_amt, rel_shp, rel_dir) = (
+        let (release, hold, hold_amt, rel_char_amt, rel_shp, rel_dir) = (
             self.params.release.value() * 0.001 * self.sample_rate,
             self.params.hold.value() * 0.001 * self.sample_rate,
+            self.params.hold_amt.value(),
             self.params.rel_char_amt.value(),
             self.params.rel_shp.value(),
             self.params.rel_dir.value(),
@@ -339,71 +353,12 @@ impl Plugin for Limit2zero {
                     continue;
                 }
 
-                let (_, i, s) = self
-                    .buffer
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| s.db > 0.0)
-                    .fold(
-                        (0.0, 0_usize, AttackSample::default()),
-                        |(f, i, s), sample| {
-                            let s_factor = (self.lookahead_len - sample.0 as f32).sqrt();
-                            if sample.1.db * s_factor > s.db * f {
-                                (s_factor, sample.0, *sample.1)
-                            } else {
-                                (f, i, s)
-                            }
-                        },
-                    );
-
-                // if s.sample != 0.0 {
-                let t = (self.lookahead_len - i as f32) / self.lookahead_len;
-                let lerp_env = lerp(0.0, -1.0 * s.db, t);
-                let ease_env = lerp(0.0, -1.0 * s.db, atk_easing.calc(t));
-                let env = lerp(lerp_env, ease_env, atk_char_amt) * attack_amount;
-
-                if env < self.envelope {
-                    self.target = env;
-                    self.envelope = env;
-                    if hold.round() >= 1.0 {
-                        self.env_state = EnvState::Hold(0.0);
-                    } else if release.round() >= 1.0 {
-                        self.env_state = EnvState::Release(0.0);
-                    } else {
-                        self.env_state = EnvState::Off;
-                    }
-                }
-                // }
-
-                let AttackSample {
-                    sample: dly_sample,
-                    db: delay_db,
-                } = self.buffer.pop_front().unwrap();
-
                 match &mut self.env_state {
-                    EnvState::Off if delay_db > 0.0 => {
-                        self.target = -1.0 * delay_db;
-                        self.envelope = self.target;
-                        if hold.round() >= 1.0 {
-                            self.env_state = EnvState::Hold(0.0);
-                        } else if release.round() >= 1.0 {
-                            self.env_state = EnvState::Release(0.0);
-                        } else {
-                            self.env_state = EnvState::Off;
-                        }
-                    }
-                    EnvState::Hold(_) if delay_db + self.envelope > 0.0 => {
-                        self.target = -1.0 * delay_db;
-                        self.envelope = self.target;
-                        if hold.round() >= 1.0 {
-                            self.env_state = EnvState::Hold(0.0);
-                        } else if release.round() >= 1.0 {
-                            self.env_state = EnvState::Release(0.0);
-                        } else {
-                            self.env_state = EnvState::Off;
-                        }
-                    }
                     EnvState::Hold(elapsed) => {
+                        if *elapsed == 0.0 {
+                            self.target = self.hold;
+                            self.envelope = self.hold;
+                        }
                         *elapsed += 1.0;
                         if *elapsed >= hold {
                             if release.round() >= 1.0 {
@@ -423,27 +378,67 @@ impl Plugin for Limit2zero {
                         if *elapsed >= release {
                             self.env_state = EnvState::Off;
                         }
-
-                        if delay_db + self.envelope > 0.0 {
-                            self.target = -1.0 * delay_db;
-                            self.envelope = self.target;
-                            if hold.round() >= 1.0 {
-                                self.env_state = EnvState::Hold(0.0);
-                            } else if release.round() >= 1.0 {
-                                self.env_state = EnvState::Release(0.0);
-                            } else {
-                                self.env_state = EnvState::Off;
-                            }
+                    }
+                    EnvState::Off => {
+                        if self.envelope != 0.0 || self.target != 0.0 || self.hold != 0.0 {
+                            self.envelope = 0.0;
+                            self.target = 0.0;
+                            self.hold = 0.0;
                         }
                     }
-                    EnvState::Off => (),
                 }
 
-                *sample = dly_sample * util::db_to_gain_fast(self.envelope + trim);
+                let (_, i, s) = self
+                    .buffer
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.db > 0.0)
+                    .fold(
+                        (0.0, 0_usize, AttackSample::default()),
+                        |(f, i, s), sample| {
+                            let s_factor = (self.lookahead_len - sample.0 as f32).sqrt();
+                            if sample.1.db * s_factor > s.db * f {
+                                (s_factor, sample.0, *sample.1)
+                            } else {
+                                (f, i, s)
+                            }
+                        },
+                    );
 
-                if self.params.c2z.value() {
-                    *sample = c2z(*sample);
+                let t = (self.lookahead_len - i as f32) / self.lookahead_len;
+                let lerp_env = lerp(0.0, -1.0 * s.db, t);
+                let ease_env = lerp(0.0, -1.0 * s.db, atk_easing.calc(t));
+                let env = lerp(lerp_env, ease_env, atk_char_amt) * attack_amount;
+
+                if env < self.envelope {
+                    self.target = env;
+                    self.hold = env;
+                    self.envelope = env;
+                    if hold.round() >= 1.0 {
+                        self.env_state = EnvState::Hold(0.0);
+                    } else if release.round() >= 1.0 {
+                        self.env_state = EnvState::Release(0.0);
+                    } else {
+                        self.env_state = EnvState::Off;
+                    }
                 }
+
+                let delay = self.buffer.pop_front().unwrap();
+
+                if delay.db + self.envelope > 0.0 {
+                    self.target = -1.0 * delay.db;
+                    self.hold = self.target * hold_amt.powf(0.25);
+                    self.envelope = self.target;
+                    if hold.round() >= 1.0 {
+                        self.env_state = EnvState::Hold(0.0);
+                    } else if release.round() >= 1.0 {
+                        self.env_state = EnvState::Release(0.0);
+                    } else {
+                        self.env_state = EnvState::Off;
+                    }
+                }
+
+                *sample = delay.sample * util::db_to_gain_fast(self.envelope + trim);
             }
         }
 
