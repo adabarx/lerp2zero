@@ -52,6 +52,9 @@ struct Limit2zeroParams {
 
     #[id = "rel_bend"]
     pub rel_bend: FloatParam,
+
+    #[id = "stereo_link"]
+    pub stereo_link: FloatParam,
 }
 
 impl Default for Limit2zero {
@@ -221,6 +224,14 @@ impl Default for Limit2zeroParams {
             )
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
+
+            stereo_link: FloatParam::new(
+                "Stereo Link",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_unit("%")
+            .with_value_to_string(formatters::v2s_f32_percentage(0)),
         }
     }
 }
@@ -299,6 +310,8 @@ impl Plugin for Limit2zero {
             self.params.rel_bend.value(),
         );
 
+        let stereo_link = self.params.stereo_link.value();
+
         if lookahead.ceil() != self.lookahead_len {
             // in bitwig i have to set half the latency samples?
             // is it like this in other DAWs?
@@ -329,8 +342,13 @@ impl Plugin for Limit2zero {
                 reductions: Vec::with_capacity(raw_buffer.len()),
             };
 
-            for (i, channel) in raw_buffer.iter_mut().enumerate() {
-                let sample = channel.get_mut(sample_id).unwrap();
+            let channel_samples: Vec<_> = raw_buffer
+                .iter_mut()
+                .enumerate()
+                .map(|(i, channel)| (i, channel.get_mut(sample_id).unwrap()))
+                .collect();
+
+            for (i, sample) in channel_samples {
                 let mut limiter = self.limiters.get_mut(i);
 
                 limiter.buffer.push_back(SampleDB {
@@ -338,6 +356,7 @@ impl Plugin for Limit2zero {
                     db: util::gain_to_db_fast(sample.abs() * input),
                 });
 
+                // do stuff based on envelope state
                 match &mut limiter.state {
                     EnvState::Hold(elapsed) => {
                         if *elapsed == 0.0 {
@@ -377,35 +396,36 @@ impl Plugin for Limit2zero {
                         }
                     }
                 }
-                let (i, s) = limiter
+
+                // do any samples in lookahead buffer need clipping?
+                let highest_atk = limiter
                     .buffer
                     .iter()
                     .rev()
                     .enumerate()
                     .filter(|(_, s)| s.db > 0.0)
-                    .fold((0_usize, SampleDB::default()), |highest, sample| {
-                        if sample.1.db > highest.1.db {
-                            (sample.0, *sample.1)
-                        } else {
-                            highest
-                        }
-                    });
-                let t = i as f32 / self.lookahead_len;
-                let atk_env = lerp(0.0, -1.0 * s.db, t.powf(atk_bend)) * atk_amt;
+                    .max_by(|a, b| a.1.db.total_cmp(&b.1.db));
 
-                if atk_env < *limiter.envelope {
-                    *limiter.target = atk_env;
-                    *limiter.hold = atk_env;
-                    *limiter.envelope = atk_env;
-                    if hold.round() >= 1.0 {
-                        *limiter.state = EnvState::Hold(0.0);
-                    } else if release.round() >= 1.0 {
-                        *limiter.state = EnvState::Release(0.0);
-                    } else {
-                        *limiter.state = EnvState::Off;
+                // calculate atk envelope
+                if let Some((i, s)) = highest_atk {
+                    let t = i as f32 / self.lookahead_len;
+                    let atk_env = lerp(0.0, -1.0 * s.db, t.powf(atk_bend)) * atk_amt;
+
+                    if atk_env < *limiter.envelope {
+                        *limiter.target = atk_env;
+                        *limiter.hold = atk_env;
+                        *limiter.envelope = atk_env;
+                        if hold.round() >= 1.0 {
+                            *limiter.state = EnvState::Hold(0.0);
+                        } else if release.round() >= 1.0 {
+                            *limiter.state = EnvState::Release(0.0);
+                        } else {
+                            *limiter.state = EnvState::Off;
+                        }
                     }
                 }
 
+                // grab delayed sample from buffer
                 let delay = limiter.buffer.pop_front().unwrap();
 
                 if delay.db + *limiter.envelope > 0.0 {
@@ -422,16 +442,17 @@ impl Plugin for Limit2zero {
                 }
                 rv_samples.add(delay.sample, *limiter.envelope);
             }
-            let most_reduction =
-                rv_samples
-                    .reductions
-                    .iter()
-                    .fold(0.0, |h, r| if *r > h { *r } else { h });
-            let stereo_link = 0.0;
+
+            let most_reduction = rv_samples
+                .reductions
+                .iter()
+                .min_by(|&a, &b| a.total_cmp(b))
+                .unwrap();
+
             for (i, s) in rv_samples.samples.iter().enumerate() {
                 let channel = raw_buffer.get_mut(i).unwrap();
                 let reduce = rv_samples.reductions.get(i).unwrap();
-                let reduce = lerp(*reduce, most_reduction, stereo_link);
+                let reduce = lerp(*reduce, *most_reduction, stereo_link);
 
                 *channel.get_mut(sample_id).unwrap() = s * util::db_to_gain_fast(reduce + trim)
             }
