@@ -4,13 +4,10 @@ use std::{collections::VecDeque, sync::Arc};
 
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
-    sample_rate: f32,
-    target: f32,
-    hold: f32,
-    envelope: f32,
-    env_state: EnvState,
-    buffer: VecDeque<SampleDB>,
     lookahead_len: f32,
+    sample_rate: f32,
+    channels: usize,
+    limiters: LimiterBuffer,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -19,7 +16,7 @@ struct SampleDB {
     db: f32,
 }
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone, Copy)]
 enum EnvState {
     Hold(f32),
     Release(f32),
@@ -62,12 +59,61 @@ impl Default for Limit2zero {
         Self {
             params: Arc::new(Limit2zeroParams::default()),
             sample_rate: 44100.0,
-            target: 0.0, // db
-            hold: 0.0,   // db
-            envelope: 0.0,
-            env_state: EnvState::Off,
-            buffer: VecDeque::new(),
+            channels: 2,
             lookahead_len: 0.0,
+            limiters: LimiterBuffer::new(2, 256),
+        }
+    }
+}
+
+struct LimiterBuffer {
+    channels: usize,
+    buffers: Vec<VecDeque<SampleDB>>,
+    state: Vec<EnvState>,
+    target: Vec<f32>,
+    hold: Vec<f32>,
+    envelope: Vec<f32>,
+}
+
+struct Limiter<'a> {
+    buffer: &'a mut VecDeque<SampleDB>,
+    state: &'a mut EnvState,
+    target: &'a mut f32,
+    hold: &'a mut f32,
+    envelope: &'a mut f32,
+}
+
+impl LimiterBuffer {
+    fn new(channels: usize, sample_len: usize) -> Self {
+        let mut rv = LimiterBuffer {
+            channels,
+            buffers: vec![VecDeque::with_capacity(sample_len); channels],
+            state: vec![EnvState::Off; channels],
+            target: vec![0.0; channels],
+            hold: vec![0.0; channels],
+            envelope: vec![0.0; channels],
+        };
+
+        for b in rv.buffers.iter_mut() {
+            for _ in 0..sample_len {
+                b.push_back(SampleDB {
+                    sample: 0.0,
+                    db: -100.0,
+                });
+            }
+        }
+
+        rv
+    }
+
+    fn get_mut(&mut self, channel: usize) -> Limiter {
+        let channel = channel.clamp(0, self.channels - 1);
+        Limiter {
+            buffer: self.buffers.get_mut(channel).unwrap(),
+            state: self.state.get_mut(channel).unwrap(),
+            target: self.target.get_mut(channel).unwrap(),
+            hold: self.hold.get_mut(channel).unwrap(),
+            envelope: self.envelope.get_mut(channel).unwrap(),
         }
     }
 }
@@ -211,16 +257,22 @@ impl Plugin for Limit2zero {
 
     fn initialize(
         &mut self,
-        _audio_io_layout: &AudioIOLayout,
+        audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        let channels = audio_io_layout.main_input_channels.unwrap().get() as usize;
+        let lookahead_len =
+            (self.params.lookahead.value() * 0.001 * buffer_config.sample_rate).ceil() as usize;
         self.sample_rate = buffer_config.sample_rate;
+        self.channels = channels;
+        self.limiters = LimiterBuffer::new(channels, lookahead_len);
         true
     }
 
     fn reset(&mut self) {
-        self.buffer = VecDeque::with_capacity(self.lookahead_len.ceil() as usize);
+        let la_len = self.lookahead_len.ceil() as usize;
+        self.limiters = LimiterBuffer::new(self.channels, la_len);
     }
 
     fn process(
@@ -256,58 +308,75 @@ impl Plugin for Limit2zero {
             self.reset();
         }
 
-        for channel_samples in buffer.iter_samples() {
-            for sample in channel_samples {
-                self.buffer.push_back(SampleDB {
+        struct Samples {
+            samples: Vec<f32>,
+            reductions: Vec<f32>,
+        }
+
+        impl Samples {
+            fn add(&mut self, sample: f32, reduction: f32) {
+                self.samples.push(sample);
+                self.reductions.push(reduction);
+            }
+        }
+
+        for sample_id in 0..buffer.samples() {
+            let mut rv_samples = Samples {
+                samples: Vec::with_capacity(buffer.channels()),
+                reductions: Vec::with_capacity(buffer.channels()),
+            };
+
+            for (i, channel_samples) in buffer.as_slice().iter_mut().enumerate() {
+                let mut limiter = self.limiters.get_mut(i);
+                let sample = channel_samples.get_mut(sample_id).unwrap();
+                limiter.buffer.push_back(SampleDB {
                     sample: *sample * input,
                     db: util::gain_to_db_fast(sample.abs() * input),
                 });
 
-                if self.lookahead_len > self.buffer.len() as f32 {
-                    *sample = 0.0;
-                    continue;
-                }
-
-                match &mut self.env_state {
+                match &mut limiter.state {
                     EnvState::Hold(elapsed) => {
                         if *elapsed == 0.0 {
-                            self.target = self.hold;
-                            self.envelope = self.hold;
+                            *limiter.target = *limiter.hold;
+                            *limiter.envelope = *limiter.hold;
                         }
                         *elapsed += 1.0;
                         if *elapsed >= hold {
                             if release.round() >= 1.0 {
-                                self.env_state = EnvState::Release(0.0);
+                                *limiter.state = EnvState::Release(0.0);
                             } else {
-                                self.env_state = EnvState::Off;
+                                *limiter.state = EnvState::Off;
                             }
                         }
                     }
                     EnvState::Release(elapsed) => {
                         if *elapsed == 0.0 {
-                            self.target = self.hold;
-                            self.envelope = self.hold;
+                            *limiter.target = *limiter.hold;
+                            *limiter.envelope = *limiter.hold;
                         }
                         *elapsed += 1.0;
                         let t = *elapsed / release;
-                        self.envelope = lerp(self.target, 0.0, t.powf(rel_bend));
+                        *limiter.envelope = lerp(*limiter.target, 0.0, t.powf(rel_bend));
 
                         if *elapsed >= release {
-                            self.env_state = EnvState::Off;
+                            *limiter.state = EnvState::Off;
                         }
                     }
                     EnvState::Off => {
-                        if self.envelope != 0.0 || self.target != 0.0 || self.hold != 0.0 {
-                            self.envelope = 0.0;
-                            self.target = 0.0;
-                            self.hold = 0.0;
+                        if *limiter.envelope != 0.0
+                            || *limiter.target != 0.0
+                            || *limiter.hold != 0.0
+                        {
+                            *limiter.envelope = 0.0;
+                            *limiter.target = 0.0;
+                            *limiter.hold = 0.0;
                         }
                     }
                 }
-
-                let (i, s) = self
+                let (i, s) = limiter
                     .buffer
                     .iter()
+                    .rev()
                     .enumerate()
                     .filter(|(_, s)| s.db > 0.0)
                     .fold((0_usize, SampleDB::default()), |highest, sample| {
@@ -317,38 +386,51 @@ impl Plugin for Limit2zero {
                             highest
                         }
                     });
-
-                let t = (self.lookahead_len - i as f32) / self.lookahead_len;
+                let t = i as f32 / self.lookahead_len;
                 let atk_env = lerp(0.0, -1.0 * s.db, t.powf(atk_bend)) * atk_amt;
 
-                if atk_env < self.envelope {
-                    self.target = atk_env;
-                    self.hold = atk_env;
-                    self.envelope = atk_env;
+                if atk_env < *limiter.envelope {
+                    *limiter.target = atk_env;
+                    *limiter.hold = atk_env;
+                    *limiter.envelope = atk_env;
                     if hold.round() >= 1.0 {
-                        self.env_state = EnvState::Hold(0.0);
+                        *limiter.state = EnvState::Hold(0.0);
                     } else if release.round() >= 1.0 {
-                        self.env_state = EnvState::Release(0.0);
+                        *limiter.state = EnvState::Release(0.0);
                     } else {
-                        self.env_state = EnvState::Off;
+                        *limiter.state = EnvState::Off;
                     }
                 }
 
-                let delay = self.buffer.pop_front().unwrap();
+                let delay = limiter.buffer.pop_front().unwrap();
 
-                if delay.db + self.envelope > 0.0 {
-                    self.target = -1.0 * delay.db;
-                    self.hold = self.target * hold_amt.powf(0.5);
-                    self.envelope = self.target;
+                if delay.db + *limiter.envelope > 0.0 {
+                    *limiter.target = -1.0 * delay.db;
+                    *limiter.hold = *limiter.target * hold_amt.powf(0.5);
+                    *limiter.envelope = *limiter.target;
                     if hold.round() >= 1.0 {
-                        self.env_state = EnvState::Hold(0.0);
+                        *limiter.state = EnvState::Hold(0.0);
                     } else if release.round() >= 1.0 {
-                        self.env_state = EnvState::Release(0.0);
+                        *limiter.state = EnvState::Release(0.0);
                     } else {
-                        self.env_state = EnvState::Off;
+                        *limiter.state = EnvState::Off;
                     }
                 }
-                *sample = delay.sample * util::db_to_gain_fast(self.envelope + trim);
+                rv_samples.add(delay.sample, *limiter.envelope);
+            }
+            let most_reduction =
+                rv_samples
+                    .reductions
+                    .iter()
+                    .fold(0.0, |h, r| if *r > h { *r } else { h });
+            let stereo_link = 0.0;
+            for (i, s) in rv_samples.samples.iter().enumerate() {
+                for mut channel in buffer.iter_samples() {
+                    let reduce = rv_samples.reductions.get(i).unwrap();
+                    let reduce = lerp(*reduce, most_reduction, stereo_link);
+
+                    *channel.get_mut(i).unwrap() = s * util::db_to_gain_fast(reduce + trim)
+                }
             }
         }
         ProcessStatus::Normal
