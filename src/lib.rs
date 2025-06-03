@@ -320,15 +320,19 @@ impl Plugin for Limit2zero {
             }
         }
 
-        for sample_id in 0..buffer.samples() {
+        let buffer_samples = buffer.samples();
+        let raw_buffer = buffer.as_slice();
+
+        for sample_id in 0..buffer_samples {
             let mut rv_samples = Samples {
-                samples: Vec::with_capacity(buffer.channels()),
-                reductions: Vec::with_capacity(buffer.channels()),
+                samples: Vec::with_capacity(raw_buffer.len()),
+                reductions: Vec::with_capacity(raw_buffer.len()),
             };
 
-            for (i, channel_samples) in buffer.as_slice().iter_mut().enumerate() {
+            for (i, channel) in raw_buffer.iter_mut().enumerate() {
+                let sample = channel.get_mut(sample_id).unwrap();
                 let mut limiter = self.limiters.get_mut(i);
-                let sample = channel_samples.get_mut(sample_id).unwrap();
+
                 limiter.buffer.push_back(SampleDB {
                     sample: *sample * input,
                     db: util::gain_to_db_fast(sample.abs() * input),
@@ -425,12 +429,11 @@ impl Plugin for Limit2zero {
                     .fold(0.0, |h, r| if *r > h { *r } else { h });
             let stereo_link = 0.0;
             for (i, s) in rv_samples.samples.iter().enumerate() {
-                for mut channel in buffer.iter_samples() {
-                    let reduce = rv_samples.reductions.get(i).unwrap();
-                    let reduce = lerp(*reduce, most_reduction, stereo_link);
+                let channel = raw_buffer.get_mut(i).unwrap();
+                let reduce = rv_samples.reductions.get(i).unwrap();
+                let reduce = lerp(*reduce, most_reduction, stereo_link);
 
-                    *channel.get_mut(i).unwrap() = s * util::db_to_gain_fast(reduce + trim)
-                }
+                *channel.get_mut(sample_id).unwrap() = s * util::db_to_gain_fast(reduce + trim)
             }
         }
         ProcessStatus::Normal
