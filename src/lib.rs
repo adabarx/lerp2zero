@@ -16,6 +16,12 @@ struct SampleDB {
     db: f32,
 }
 
+impl SampleDB {
+    fn peak(&self) -> bool {
+        self.db > 0.0
+    }
+}
+
 #[derive(Default, Debug, PartialEq, Clone, Copy)]
 enum EnvState {
     Hold(f32),
@@ -26,8 +32,8 @@ enum EnvState {
 
 #[derive(Params)]
 struct Limit2zeroParams {
-    #[id = "input"]
-    pub input: FloatParam,
+    #[id = "drive"]
+    pub drive: FloatParam,
 
     #[id = "trim"]
     pub trim: FloatParam,
@@ -55,6 +61,9 @@ struct Limit2zeroParams {
 
     #[id = "stereo_link"]
     pub stereo_link: FloatParam,
+
+    #[id = "compensate"]
+    pub compensate: BoolParam,
 }
 
 impl Default for Limit2zero {
@@ -72,14 +81,32 @@ impl Default for Limit2zero {
 struct LimiterBuffer {
     channels: usize,
     buffers: Vec<VecDeque<SampleDB>>,
+    peaks: Vec<VecDeque<Peak>>,
     state: Vec<EnvState>,
     target: Vec<f32>,
     hold: Vec<f32>,
     envelope: Vec<f32>,
 }
 
+#[derive(Clone, Copy)]
+struct Peak {
+    db: f32,
+    index: isize,
+}
+
+impl Peak {
+    fn factor(&self) -> f32 {
+        self.index as f32 * self.db
+    }
+
+    fn index_f32(&self) -> f32 {
+        self.index as f32
+    }
+}
+
 struct Limiter<'a> {
     buffer: &'a mut VecDeque<SampleDB>,
+    peaks: &'a mut VecDeque<Peak>,
     state: &'a mut EnvState,
     target: &'a mut f32,
     hold: &'a mut f32,
@@ -91,6 +118,7 @@ impl LimiterBuffer {
         let mut rv = LimiterBuffer {
             channels,
             buffers: vec![VecDeque::with_capacity(sample_len); channels],
+            peaks: vec![VecDeque::with_capacity(sample_len); channels],
             state: vec![EnvState::Off; channels],
             target: vec![0.0; channels],
             hold: vec![0.0; channels],
@@ -113,6 +141,7 @@ impl LimiterBuffer {
         let channel = channel.clamp(0, self.channels - 1);
         Limiter {
             buffer: self.buffers.get_mut(channel).unwrap(),
+            peaks: self.peaks.get_mut(channel).unwrap(),
             state: self.state.get_mut(channel).unwrap(),
             target: self.target.get_mut(channel).unwrap(),
             hold: self.hold.get_mut(channel).unwrap(),
@@ -124,13 +153,13 @@ impl LimiterBuffer {
 impl Default for Limit2zeroParams {
     fn default() -> Self {
         Self {
-            input: FloatParam::new(
-                "Input",
+            drive: FloatParam::new(
+                "Drive",
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
-                    min: util::db_to_gain(-36.0),
-                    max: util::db_to_gain(36.0),
-                    factor: FloatRange::gain_skew_factor(-36.0, 36.0),
+                    min: util::db_to_gain(0.0),
+                    max: util::db_to_gain(60.0),
+                    factor: FloatRange::gain_skew_factor(0.0, 60.0),
                 },
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
@@ -232,6 +261,8 @@ impl Default for Limit2zeroParams {
             )
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
+
+            compensate: BoolParam::new("Gain Compensation", false),
         }
     }
 }
@@ -292,7 +323,7 @@ impl Plugin for Limit2zero {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let (input, trim) = (self.params.input.value(), self.params.trim.value());
+        let (input, trim) = (self.params.drive.value(), self.params.trim.value());
 
         let (lookahead, atk_amt, atk_bend) = (
             self.params.lookahead.value() * 0.001 * self.sample_rate,
@@ -342,6 +373,8 @@ impl Plugin for Limit2zero {
                 reductions: Vec::with_capacity(raw_buffer.len()),
             };
 
+            let mut most_reduction = 0.0;
+
             let channel_samples: Vec<_> = raw_buffer
                 .iter_mut()
                 .enumerate()
@@ -351,10 +384,19 @@ impl Plugin for Limit2zero {
             for (i, sample) in channel_samples {
                 let mut limiter = self.limiters.get_mut(i);
 
-                limiter.buffer.push_back(SampleDB {
+                let new_sample = SampleDB {
                     sample: *sample * input,
                     db: util::gain_to_db_fast(sample.abs() * input),
-                });
+                };
+
+                if new_sample.peak() {
+                    limiter.peaks.push_back(Peak {
+                        db: new_sample.db,
+                        index: -1,
+                    });
+                }
+
+                limiter.buffer.push_back(new_sample);
 
                 // do stuff based on envelope state
                 match &mut limiter.state {
@@ -397,23 +439,23 @@ impl Plugin for Limit2zero {
                     }
                 }
 
-                // do any samples in lookahead buffer need clipping?
-                let highest_atk = limiter
-                    .buffer
-                    .iter()
-                    .rev()
-                    .enumerate()
-                    .filter(|(_, s)| s.db > 0.0)
-                    .max_by(|a, b| a.1.db.total_cmp(&b.1.db));
+                let mut peak = Peak { db: 0.0, index: 0 };
+
+                for p in limiter.peaks.iter_mut() {
+                    if p.factor() > peak.factor() {
+                        peak = *p;
+                    }
+                    p.index += 1;
+                }
 
                 // calculate atk envelope
-                if let Some((i, s)) = highest_atk {
-                    let t = i as f32 / self.lookahead_len;
-                    let atk_env = lerp(0.0, -1.0 * s.db, t.powf(atk_bend)) * atk_amt;
+                if peak.db > 0.0 {
+                    let t = peak.index_f32() / self.lookahead_len;
+                    let atk_env = lerp(0.0, -1.0 * peak.db, t.powf(atk_bend)) * atk_amt;
 
                     if atk_env < *limiter.envelope {
                         *limiter.target = atk_env;
-                        *limiter.hold = atk_env;
+                        *limiter.hold = atk_env * hold_amt.sqrt();
                         *limiter.envelope = atk_env;
                         if hold.round() >= 1.0 {
                             *limiter.state = EnvState::Hold(0.0);
@@ -428,9 +470,13 @@ impl Plugin for Limit2zero {
                 // grab delayed sample from buffer
                 let delay = limiter.buffer.pop_front().unwrap();
 
+                if delay.peak() {
+                    let _ = limiter.peaks.pop_front().unwrap();
+                }
+
                 if delay.db + *limiter.envelope > 0.0 {
                     *limiter.target = -1.0 * delay.db;
-                    *limiter.hold = *limiter.target * hold_amt.powf(0.5);
+                    *limiter.hold = *limiter.target * hold_amt.sqrt();
                     *limiter.envelope = *limiter.target;
                     if hold.round() >= 1.0 {
                         *limiter.state = EnvState::Hold(0.0);
@@ -440,21 +486,25 @@ impl Plugin for Limit2zero {
                         *limiter.state = EnvState::Off;
                     }
                 }
+
+                most_reduction = f32::min(most_reduction, *limiter.envelope);
+
                 rv_samples.add(delay.sample, *limiter.envelope);
             }
 
-            let most_reduction = rv_samples
-                .reductions
-                .iter()
-                .min_by(|&a, &b| a.total_cmp(b))
-                .unwrap();
+            let compensation = if self.params.compensate.value() {
+                util::gain_to_db_fast(input) / -2.0
+            } else {
+                0.0
+            };
 
             for (i, s) in rv_samples.samples.iter().enumerate() {
                 let channel = raw_buffer.get_mut(i).unwrap();
                 let reduce = rv_samples.reductions.get(i).unwrap();
-                let reduce = lerp(*reduce, *most_reduction, stereo_link);
+                let reduce = lerp(*reduce, most_reduction, stereo_link);
 
-                *channel.get_mut(sample_id).unwrap() = s * util::db_to_gain_fast(reduce + trim)
+                *channel.get_mut(sample_id).unwrap() =
+                    s * util::db_to_gain_fast(reduce + trim + compensation)
             }
         }
         ProcessStatus::Normal
