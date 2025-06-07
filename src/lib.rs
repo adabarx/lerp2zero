@@ -392,7 +392,7 @@ impl Plugin for Limit2zero {
                 if new_sample.peak() {
                     limiter.peaks.push_back(Peak {
                         db: new_sample.db,
-                        index: -1,
+                        index: 0,
                     });
                 }
 
@@ -440,10 +440,13 @@ impl Plugin for Limit2zero {
                 }
 
                 let mut peak = Peak { db: 0.0, index: 0 };
+                let mut peak_factor = 0.0;
 
                 for p in limiter.peaks.iter_mut() {
-                    if p.factor() > peak.factor() {
+                    let p_factor = p.factor();
+                    if p_factor > peak_factor {
                         peak = *p;
+                        peak_factor = p_factor
                     }
                     p.index += 1;
                 }
