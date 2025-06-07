@@ -1,6 +1,11 @@
+#![feature(portable_simd)]
 use core::f32;
 use nih_plug::prelude::*;
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    simd::{num::SimdFloat, Simd},
+    sync::Arc,
+};
 
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
@@ -265,6 +270,45 @@ impl Default for Limit2zeroParams {
             compensate: BoolParam::new("Gain Compensation", false),
         }
     }
+}
+
+fn simd_max_peak(buffer: &[f32]) -> f32 {
+    const LANES: usize = 8;
+
+    let len_vec = Simd::splat((buffer.len() + 1) as f32);
+    let mut max_vec = Simd::splat(0.0);
+
+    let chunks = buffer.chunks_exact(LANES);
+    let remainder = chunks.remainder();
+
+    let mut base_index = 1.0;
+
+    for chunk in chunks {
+        let vec_index =
+            Simd::<f32, LANES>::from_array(core::array::from_fn(|i| base_index + i as f32));
+        let values = Simd::from_slice(chunk);
+
+        max_vec = max_vec.simd_max(values * vec_index / len_vec);
+
+        base_index += LANES as f32;
+    }
+
+    if !remainder.is_empty() {
+        let mut padded_vals = [0.0; LANES];
+        let mut padded_idx = [0.0; LANES];
+
+        for i in 0..remainder.len() {
+            padded_vals[i] = remainder[i];
+            padded_idx[i] = base_index + i as f32;
+        }
+
+        let values = Simd::from_array(padded_vals);
+        let vec_index = Simd::from_array(padded_idx);
+
+        max_vec = max_vec.simd_max(values * vec_index / len_vec)
+    }
+
+    max_vec.reduce_max()
 }
 
 impl Plugin for Limit2zero {
