@@ -2,37 +2,54 @@
 use core::f32;
 use nih_plug::prelude::*;
 use std::{
+    array,
     collections::VecDeque,
-    simd::{num::SimdFloat, Simd},
+    simd::{
+        cmp::{SimdPartialEq, SimdPartialOrd},
+        f32x2,
+        num::SimdFloat,
+        LaneCount, Simd, StdFloat, SupportedLaneCount,
+    },
     sync::Arc,
 };
+
+mod simd;
 
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
     lookahead_len: f32,
     sample_rate: f32,
     channels: usize,
-    limiters: LimiterBuffer,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct SampleDB {
-    sample: f32,
-    db: f32,
-}
-
-impl SampleDB {
-    fn peak(&self) -> bool {
-        self.db > 0.0
-    }
+    limiter: LimiterBufferSimd<2>,
 }
 
 #[derive(Default, Debug, PartialEq, Clone, Copy)]
 enum EnvState {
-    Hold(f32),
-    Release(f32),
+    Hold,
+    Release,
     #[default]
     Off,
+}
+
+impl From<u32> for EnvState {
+    fn from(value: u32) -> Self {
+        match value {
+            2 => EnvState::Hold,
+            1 => EnvState::Release,
+            0 => EnvState::Off,
+            _ => panic!("lol"),
+        }
+    }
+}
+
+impl From<EnvState> for u32 {
+    fn from(value: EnvState) -> Self {
+        match value {
+            EnvState::Hold => 2,
+            EnvState::Release => 1,
+            EnvState::Off => 0,
+        }
+    }
 }
 
 #[derive(Params)]
@@ -78,79 +95,127 @@ impl Default for Limit2zero {
             sample_rate: 44100.0,
             channels: 2,
             lookahead_len: 0.0,
-            limiters: LimiterBuffer::new(2, 256),
+            limiter: LimiterBufferSimd::<2>::new(256),
         }
     }
 }
 
-struct LimiterBuffer {
-    channels: usize,
-    buffers: Vec<VecDeque<SampleDB>>,
-    peaks: Vec<VecDeque<Peak>>,
-    state: Vec<EnvState>,
-    target: Vec<f32>,
-    hold: Vec<f32>,
-    envelope: Vec<f32>,
+struct LimiterBufferSimd<const L: usize>
+where
+    LaneCount<L>: SupportedLaneCount,
+{
+    buffer: SampleBuf<L>,
+    state: Simd<u32, L>,
+    elapsed: Simd<f32, L>,
+    target: Simd<f32, L>,
+    hold: Simd<f32, L>,
+    envelope: Simd<f32, L>,
 }
 
-#[derive(Clone, Copy)]
-struct Peak {
-    db: f32,
-    index: isize,
+impl<const L: usize> LimiterBufferSimd<L>
+where
+    LaneCount<L>: SupportedLaneCount,
+{
+    fn new(length: usize) -> Self {
+        Self {
+            buffer: SampleBuf::new(length),
+            state: Simd::from_array([EnvState::Off.into(); L]),
+            elapsed: Simd::from_array([0.0; L]),
+            target: Simd::from_array([0.0; L]),
+            hold: Simd::from_array([0.0; L]),
+            envelope: Simd::from_array([0.0; L]),
+        }
+    }
 }
 
-impl Peak {
-    fn factor(&self) -> f32 {
-        self.index as f32 * self.db
+struct SampleBuf<const L: usize>
+where
+    LaneCount<L>: SupportedLaneCount,
+{
+    samples: [VecDeque<f32>; L],
+    dbs: [VecDeque<f32>; L],
+}
+
+impl<const L: usize> SampleBuf<L>
+where
+    LaneCount<L>: SupportedLaneCount,
+{
+    fn new(capacity: usize) -> Self {
+        Self {
+            samples: std::array::from_fn(|_| VecDeque::with_capacity(capacity)),
+            dbs: std::array::from_fn(|_| VecDeque::with_capacity(capacity)),
+        }
     }
 
-    fn index_f32(&self) -> f32 {
-        self.index as f32
+    fn len(&self) -> usize {
+        self.dbs[0].len()
     }
-}
 
-struct Limiter<'a> {
-    buffer: &'a mut VecDeque<SampleDB>,
-    peaks: &'a mut VecDeque<Peak>,
-    state: &'a mut EnvState,
-    target: &'a mut f32,
-    hold: &'a mut f32,
-    envelope: &'a mut f32,
-}
+    fn push_back(&mut self, sample: [f32; L]) {
+        for i in 0..L {
+            self.samples[i].push_back(sample[i]);
+            self.samples[i].push_back(util::gain_to_db_fast(sample[i]));
+        }
+    }
 
-impl LimiterBuffer {
-    fn new(channels: usize, sample_len: usize) -> Self {
-        let mut rv = LimiterBuffer {
-            channels,
-            buffers: vec![VecDeque::with_capacity(sample_len); channels],
-            peaks: vec![VecDeque::with_capacity(sample_len); channels],
-            state: vec![EnvState::Off; channels],
-            target: vec![0.0; channels],
-            hold: vec![0.0; channels],
-            envelope: vec![0.0; channels],
-        };
+    fn pop_front(&mut self) -> Option<Sample<L>> {
+        if self.samples.len() == 0 {
+            return None;
+        }
+        let mut sample = [0.0; L];
+        let mut db = [0.0; L];
+        for i in 0..L {
+            sample[i] = self.samples[i].pop_front().unwrap();
+            db[i] = self.dbs[i].pop_front().unwrap();
+        }
+        Some(Sample::from_array(sample, db))
+    }
 
-        for b in rv.buffers.iter_mut() {
-            for _ in 0..sample_len {
-                b.push_back(SampleDB {
-                    sample: 0.0,
-                    db: -100.0,
-                });
+    fn dbs_simd(&self, channel: usize) -> Vec<Simd<f32, L>> {
+        if channel >= L {
+            panic!("invalid channel")
+        }
+        let db = &self.dbs[channel];
+        let mut output = Vec::with_capacity((db.len() + L - 1) / L);
+
+        let mut end = false;
+        let mut index = 0;
+        loop {
+            let mut padded = [0.0; L];
+            for i in 0..L {
+                if let Some(s) = db.get(index + i) {
+                    padded[i] = *s;
+                } else {
+                    end = true;
+                }
             }
+            output.push(Simd::from_array(padded));
+            if end {
+                break;
+            }
+            index += L;
         }
 
-        rv
+        output
     }
+}
 
-    fn get_mut(&mut self, channel: usize) -> Limiter {
-        let channel = channel.clamp(0, self.channels - 1);
-        Limiter {
-            buffer: self.buffers.get_mut(channel).unwrap(),
-            peaks: self.peaks.get_mut(channel).unwrap(),
-            state: self.state.get_mut(channel).unwrap(),
-            target: self.target.get_mut(channel).unwrap(),
-            hold: self.hold.get_mut(channel).unwrap(),
-            envelope: self.envelope.get_mut(channel).unwrap(),
+struct Sample<const L: usize>
+where
+    LaneCount<L>: SupportedLaneCount,
+{
+    sample: Simd<f32, L>,
+    db: Simd<f32, L>,
+}
+
+impl<const L: usize> Sample<L>
+where
+    LaneCount<L>: SupportedLaneCount,
+{
+    fn from_array(s: [f32; L], d: [f32; L]) -> Self {
+        Self {
+            sample: Simd::from_array(s),
+            db: Simd::from_array(d),
         }
     }
 }
@@ -272,45 +337,6 @@ impl Default for Limit2zeroParams {
     }
 }
 
-fn simd_max_peak(buffer: &[f32]) -> f32 {
-    const LANES: usize = 8;
-
-    let len_vec = Simd::splat((buffer.len() + 1) as f32);
-    let mut max_vec = Simd::splat(0.0);
-
-    let chunks = buffer.chunks_exact(LANES);
-    let remainder = chunks.remainder();
-
-    let mut base_index = 1.0;
-
-    for chunk in chunks {
-        let vec_index =
-            Simd::<f32, LANES>::from_array(core::array::from_fn(|i| base_index + i as f32));
-        let values = Simd::from_slice(chunk);
-
-        max_vec = max_vec.simd_max(values * vec_index / len_vec);
-
-        base_index += LANES as f32;
-    }
-
-    if !remainder.is_empty() {
-        let mut padded_vals = [0.0; LANES];
-        let mut padded_idx = [0.0; LANES];
-
-        for i in 0..remainder.len() {
-            padded_vals[i] = remainder[i];
-            padded_idx[i] = base_index + i as f32;
-        }
-
-        let values = Simd::from_array(padded_vals);
-        let vec_index = Simd::from_array(padded_idx);
-
-        max_vec = max_vec.simd_max(values * vec_index / len_vec)
-    }
-
-    max_vec.reduce_max()
-}
-
 impl Plugin for Limit2zero {
     const NAME: &'static str = "limit2zero";
     const VENDOR: &'static str = "Adamina Barx";
@@ -352,13 +378,13 @@ impl Plugin for Limit2zero {
             (self.params.lookahead.value() * 0.001 * buffer_config.sample_rate).ceil() as usize;
         self.sample_rate = buffer_config.sample_rate;
         self.channels = channels;
-        self.limiters = LimiterBuffer::new(channels, lookahead_len);
+        self.limiter = LimiterBufferSimd::<2>::new(lookahead_len);
         true
     }
 
     fn reset(&mut self) {
         let la_len = self.lookahead_len.ceil() as usize;
-        self.limiters = LimiterBuffer::new(self.channels, la_len);
+        self.limiter = LimiterBufferSimd::<2>::new(la_len);
     }
 
     fn process(
@@ -367,9 +393,12 @@ impl Plugin for Limit2zero {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let (input, trim) = (self.params.drive.value(), self.params.trim.value());
+        let (input, trim) = (
+            self.params.drive.value(),
+            Simd::splat(self.params.trim.value()),
+        );
 
-        let (lookahead, atk_amt, atk_bend) = (
+        let (lookahead, _atk_amt, _atk_bend) = (
             self.params.lookahead.value() * 0.001 * self.sample_rate,
             self.params.attack_amt.value(),
             self.params.atk_bend.value(),
@@ -377,10 +406,10 @@ impl Plugin for Limit2zero {
 
         let (hold, hold_amt) = (
             self.params.hold.value() * 0.001 * self.sample_rate,
-            self.params.hold_amt.value(),
+            Simd::splat(self.params.hold_amt.value().sqrt()),
         );
 
-        let (release, rel_bend) = (
+        let (release, _rel_bend) = (
             self.params.release.value() * 0.001 * self.sample_rate,
             self.params.rel_bend.value(),
         );
@@ -396,171 +425,175 @@ impl Plugin for Limit2zero {
             self.reset();
         }
 
-        struct Samples {
-            samples: Vec<f32>,
-            reductions: Vec<f32>,
-        }
-
-        impl Samples {
-            fn add(&mut self, sample: f32, reduction: f32) {
-                self.samples.push(sample);
-                self.reductions.push(reduction);
-            }
-        }
-
         let buffer_samples = buffer.samples();
         let raw_buffer = buffer.as_slice();
 
-        for sample_id in 0..buffer_samples {
-            let mut rv_samples = Samples {
-                samples: Vec::with_capacity(raw_buffer.len()),
-                reductions: Vec::with_capacity(raw_buffer.len()),
-            };
-
-            let mut most_reduction = 0.0;
-
-            let channel_samples: Vec<_> = raw_buffer
-                .iter_mut()
-                .enumerate()
-                .map(|(i, channel)| (i, channel.get_mut(sample_id).unwrap()))
-                .collect();
-
-            for (i, sample) in channel_samples {
-                let mut limiter = self.limiters.get_mut(i);
-
-                let new_sample = SampleDB {
-                    sample: *sample * input,
-                    db: util::gain_to_db_fast(sample.abs() * input),
-                };
-
-                if new_sample.peak() {
-                    limiter.peaks.push_back(Peak {
-                        db: new_sample.db,
-                        index: 0,
-                    });
+        for s_id in 0..buffer_samples {
+            let samples = array::from_fn(|i| {
+                if let Some(channel) = raw_buffer.get(i) {
+                    channel[s_id]
+                } else {
+                    0.0
                 }
+            });
 
-                limiter.buffer.push_back(new_sample);
+            let sample_vec = f32x2::from_array(samples);
+            let sample_vec = sample_vec * Simd::splat(input);
 
-                // do stuff based on envelope state
-                match &mut limiter.state {
-                    EnvState::Hold(elapsed) => {
-                        if *elapsed == 0.0 {
-                            *limiter.target = *limiter.hold;
-                            *limiter.envelope = *limiter.hold;
-                        }
-                        *elapsed += 1.0;
-                        if *elapsed >= hold {
-                            if release.round() >= 1.0 {
-                                *limiter.state = EnvState::Release(0.0);
-                            } else {
-                                *limiter.state = EnvState::Off;
-                            }
-                        }
-                    }
-                    EnvState::Release(elapsed) => {
-                        if *elapsed == 0.0 {
-                            *limiter.target = *limiter.hold;
-                            *limiter.envelope = *limiter.hold;
-                        }
-                        *elapsed += 1.0;
-                        let t = *elapsed / release;
-                        *limiter.envelope = lerp(*limiter.target, 0.0, t.powf(rel_bend));
+            self.limiter.buffer.push_back(sample_vec.into());
 
-                        if *elapsed >= release {
-                            *limiter.state = EnvState::Off;
-                        }
-                    }
-                    EnvState::Off => {
-                        if *limiter.envelope != 0.0
-                            || *limiter.target != 0.0
-                            || *limiter.hold != 0.0
-                        {
-                            *limiter.envelope = 0.0;
-                            *limiter.target = 0.0;
-                            *limiter.hold = 0.0;
-                        }
-                    }
-                }
+            let hold_mask = self
+                .limiter
+                .state
+                .simd_eq(Simd::splat(EnvState::Hold.into()));
+            let release_mask = self
+                .limiter
+                .state
+                .simd_eq(Simd::splat(EnvState::Release.into()));
 
-                let mut peak = Peak { db: 0.0, index: 0 };
-                let mut peak_factor = 0.0;
+            if hold_mask.any() {
+                let mut elapsed = self.limiter.elapsed;
 
-                for p in limiter.peaks.iter_mut() {
-                    let p_factor = p.factor();
-                    if p_factor > peak_factor {
-                        peak = *p;
-                        peak_factor = p_factor
-                    }
-                    p.index += 1;
-                }
+                let elapsed_0 = elapsed.simd_eq(Simd::splat(0.0));
+                self.limiter.target = elapsed_0.select(self.limiter.hold, self.limiter.target);
+                self.limiter.envelope = elapsed_0.select(self.limiter.hold, self.limiter.envelope);
 
-                // calculate atk envelope
-                if peak.db > 0.0 {
-                    let t = peak.index_f32() / self.lookahead_len;
-                    let atk_env = lerp(0.0, -1.0 * peak.db, t.powf(atk_bend)) * atk_amt;
+                elapsed += Simd::splat(1.0);
 
-                    if atk_env < *limiter.envelope {
-                        *limiter.target = atk_env;
-                        *limiter.hold = atk_env * hold_amt.sqrt();
-                        *limiter.envelope = atk_env;
-                        if hold.round() >= 1.0 {
-                            *limiter.state = EnvState::Hold(0.0);
-                        } else if release.round() >= 1.0 {
-                            *limiter.state = EnvState::Release(0.0);
-                        } else {
-                            *limiter.state = EnvState::Off;
-                        }
-                    }
-                }
+                self.limiter.elapsed = hold_mask.select(elapsed, self.limiter.elapsed);
 
-                // grab delayed sample from buffer
-                let delay = limiter.buffer.pop_front().unwrap();
-
-                if delay.peak() {
-                    let _ = limiter.peaks.pop_front().unwrap();
-                }
-
-                if delay.db + *limiter.envelope > 0.0 {
-                    *limiter.target = -1.0 * delay.db;
-                    *limiter.hold = *limiter.target * hold_amt.sqrt();
-                    *limiter.envelope = *limiter.target;
-                    if hold.round() >= 1.0 {
-                        *limiter.state = EnvState::Hold(0.0);
-                    } else if release.round() >= 1.0 {
-                        *limiter.state = EnvState::Release(0.0);
+                let elapsed_100 = elapsed.simd_ge(Simd::splat(hold));
+                if elapsed_100.any() {
+                    if release.round() >= 1.0 {
+                        self.limiter.state = elapsed_100
+                            .select(Simd::splat(EnvState::Release.into()), self.limiter.state);
                     } else {
-                        *limiter.state = EnvState::Off;
+                        self.limiter.state = elapsed_100
+                            .select(Simd::splat(EnvState::Off.into()), self.limiter.state);
                     }
+                    self.limiter.elapsed =
+                        elapsed_100.select(Simd::splat(0.0), self.limiter.elapsed);
                 }
-
-                most_reduction = f32::min(most_reduction, *limiter.envelope);
-
-                rv_samples.add(delay.sample, *limiter.envelope);
             }
 
-            let compensation = if self.params.compensate.value() {
-                util::gain_to_db_fast(input) / -2.0
-            } else {
-                0.0
-            };
+            if release_mask.any() {
+                let mut elapsed = self.limiter.elapsed;
 
-            for (i, s) in rv_samples.samples.iter().enumerate() {
-                let channel = raw_buffer.get_mut(i).unwrap();
-                let reduce = rv_samples.reductions.get(i).unwrap();
-                let reduce = lerp(*reduce, most_reduction, stereo_link);
+                let elapsed_0 = elapsed.simd_eq(Simd::splat(0.0));
+                self.limiter.target = elapsed_0.select(self.limiter.hold, self.limiter.target);
+                self.limiter.envelope = elapsed_0.select(self.limiter.hold, self.limiter.envelope);
 
-                *channel.get_mut(sample_id).unwrap() =
-                    s * util::db_to_gain_fast(reduce + trim + compensation)
+                elapsed += Simd::splat(1.0);
+                self.limiter.elapsed = hold_mask.select(elapsed, self.limiter.elapsed);
+
+                let t = elapsed / Simd::splat(release);
+                self.limiter.envelope = simd_lerp(self.limiter.target, Simd::splat(0.0), t);
+
+                let elapsed_100 = elapsed.simd_ge(Simd::splat(hold));
+                if elapsed_100.any() {
+                    self.limiter.state =
+                        elapsed_100.select(Simd::splat(EnvState::Off.into()), self.limiter.state);
+                    self.limiter.elapsed =
+                        elapsed_100.select(Simd::splat(0.0), self.limiter.elapsed);
+                }
+            }
+
+            let delayed_sample = self.limiter.buffer.pop_front().unwrap();
+
+            let attack = Simd::from_array(array::from_fn(|i| {
+                let dbs = self.limiter.buffer.dbs_simd(i);
+                let len = self.limiter.buffer.len() as f32;
+                simd::simd_max_reduction(dbs, len)
+            }));
+
+            let atk_mask = attack.simd_gt(self.limiter.envelope);
+
+            if atk_mask.any() {
+                self.limiter.target = atk_mask.select(attack, self.limiter.target);
+                self.limiter.hold = atk_mask.select(attack * hold_amt, self.limiter.hold);
+                self.limiter.envelope = atk_mask.select(attack, self.limiter.envelope);
+                self.limiter.elapsed = atk_mask.select(Simd::splat(0.0), self.limiter.elapsed);
+                if hold.round() >= 1.0 {
+                    self.limiter.state =
+                        atk_mask.select(Simd::splat(EnvState::Hold.into()), self.limiter.state);
+                } else if release.round() >= 1.0 {
+                    self.limiter.state =
+                        atk_mask.select(Simd::splat(EnvState::Release.into()), self.limiter.state);
+                } else {
+                    self.limiter.state =
+                        atk_mask.select(Simd::splat(EnvState::Off.into()), self.limiter.state);
+                }
+            }
+
+            let reduction = delayed_sample.db + self.limiter.envelope;
+            let clip_mask = reduction.simd_lt(Simd::splat(0.0));
+
+            if clip_mask.any() {
+                let clip = delayed_sample.db * Simd::splat(-1.0);
+                let clip_hold = clip * hold_amt;
+
+                self.limiter.target = clip_mask.select(clip, self.limiter.target);
+                self.limiter.hold = clip_mask.select(clip_hold, self.limiter.hold);
+                self.limiter.envelope = clip_mask.select(clip, self.limiter.envelope);
+
+                self.limiter.elapsed = atk_mask.select(Simd::splat(0.0), self.limiter.elapsed);
+                if hold.round() >= 1.0 {
+                    self.limiter.state =
+                        atk_mask.select(Simd::splat(EnvState::Hold.into()), self.limiter.state);
+                } else if release.round() >= 1.0 {
+                    self.limiter.state =
+                        atk_mask.select(Simd::splat(EnvState::Release.into()), self.limiter.state);
+                } else {
+                    self.limiter.state =
+                        atk_mask.select(Simd::splat(EnvState::Off.into()), self.limiter.state);
+                }
+            }
+
+            let max_reduction = Simd::splat(self.limiter.envelope.reduce_min());
+
+            let stereo_link = Simd::splat(stereo_link);
+
+            let stereo_lerp = simd_lerp(self.limiter.envelope, max_reduction, stereo_link);
+
+            let compensation = Simd::from_array(array::from_fn(|_| {
+                if self.params.compensate.value() {
+                    util::gain_to_db_fast(input) / -2.0
+                } else {
+                    0.0
+                }
+            }));
+
+            let final_reduction = stereo_lerp + trim + compensation;
+
+            let sample: [f32; 2] =
+                (delayed_sample.sample * db_to_gain_fast_simd(final_reduction)).into();
+
+            for i in 0..self.channels {
+                raw_buffer[i][s_id] = sample[i];
             }
         }
         ProcessStatus::Normal
     }
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
+fn db_to_gain_fast_simd<const L: usize>(dbs: Simd<f32, L>) -> Simd<f32, L>
+where
+    LaneCount<L>: SupportedLaneCount,
+{
+    let conversion_factor = Simd::splat(std::f32::consts::LN_10 / 20.0);
+    (dbs * conversion_factor).exp()
+}
+
+fn simd_lerp<const L: usize>(a: Simd<f32, L>, b: Simd<f32, L>, t: Simd<f32, L>) -> Simd<f32, L>
+where
+    LaneCount<L>: SupportedLaneCount,
+{
     a + (b - a) * t
 }
+
+// fn lerp(a: f32, b: f32, t: f32) -> f32 {
+//     a + (b - a) * t
+// }
 
 impl ClapPlugin for Limit2zero {
     const CLAP_ID: &'static str = "com.your-domain.limit2zero";
