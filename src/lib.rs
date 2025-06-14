@@ -149,7 +149,7 @@ impl LimiterBuffer {
         rv
     }
 
-    fn get_mut(&mut self, channel: usize) -> Limiter {
+    fn get_mut(&'_ mut self, channel: usize) -> Limiter<'_> {
         let channel = channel.clamp(0, self.channels - 1);
         Limiter {
             buffer: self.buffers.get_mut(channel).unwrap(),
@@ -359,11 +359,6 @@ impl Default for Limit2zeroParams {
             compensate: BoolParam::new("Gain Compensation", false),
         }
     }
-}
-
-fn round_to_nearest(value: f32, interval: f32) -> f32 {
-    let recip = interval.recip();
-    (value * recip).round() / recip
 }
 
 impl Plugin for Limit2zero {
