@@ -44,8 +44,14 @@ struct Limit2zeroParams {
     #[id = "attack_amt"]
     pub attack_amt: FloatParam,
 
+    #[id = "atk_linearity"]
+    pub atk_linearity: FloatParam,
+
     #[id = "atk_bend"]
     pub atk_bend: FloatParam,
+
+    #[id = "atk_bend_power"]
+    pub atk_bend_power: FloatParam,
 
     #[id = "hold"]
     pub hold: FloatParam,
@@ -56,8 +62,14 @@ struct Limit2zeroParams {
     #[id = "release"]
     pub release: FloatParam,
 
+    #[id = "rel_linearity"]
+    pub rel_linearity: FloatParam,
+
     #[id = "rel_bend"]
     pub rel_bend: FloatParam,
+
+    #[id = "rel_bend_power"]
+    pub rel_bend_power: FloatParam,
 
     #[id = "stereo_link"]
     pub stereo_link: FloatParam,
@@ -187,16 +199,68 @@ impl Default for Limit2zeroParams {
                     factor: 0.75,
                 },
             )
-            .with_unit("ms")
-            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            .with_value_to_string(Arc::new(move |value| {
+                if value < 1.01 {
+                    format!("{} samples", (value * 48.0).ceil() as usize)
+                } else {
+                    format!("{:.1}ms", value)
+                }
+            })),
 
             attack_amt: FloatParam::new(
                 "Attack Amount",
+                1.0,
+                FloatRange::Linear { min: 0.0, max: 5.0 },
+            )
+            .with_value_to_string(Arc::new(move |value| {
+                if value <= 4.0 {
+                    let value = 2_f32.powf(value);
+                    if value < 10.0 {
+                        format!("{:.1}:1", value)
+                    } else {
+                        format!("{:.0}:1", value)
+                    }
+                } else {
+                    let diff = (value - 4.0).powi(3);
+                    let value = 2_f32.powf(value + diff);
+
+                    if value > 50.0 {
+                        format!("inf:1")
+                    } else {
+                        format!("{:.0}:1", value)
+                    }
+                }
+            })),
+
+            atk_linearity: FloatParam::new(
+                "Attack Linearity",
                 1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
+
+            atk_bend: FloatParam::new(
+                "Attack Bend Direction",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_value_to_string(Arc::new(move |value| {
+                let value = 100.0 * (value * 2.0 - 1.0);
+                let s = 100.0 - value.abs();
+                if value < 0.0 {
+                    format!("S{:.0} : I{:.0}", s, value.abs())
+                } else {
+                    format!("S{:.0} : O{:.0}", s, value.abs())
+                }
+            })),
+
+            atk_bend_power: FloatParam::new(
+                "Attack Bend Power",
+                2.0,
+                FloatRange::Linear { min: 2.0, max: 6.0 },
+            )
+            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
 
             hold: FloatParam::new(
                 "Hold",
@@ -207,8 +271,20 @@ impl Default for Limit2zeroParams {
                     factor: 0.375,
                 },
             )
-            .with_unit("ms")
-            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            .with_value_to_string(Arc::new(move |value| {
+                if value < 1.0 {
+                    format!("{} samples", (value * 48.0).ceil() as usize)
+                } else if value < 10.0 {
+                    format!("{:.2}ms", value)
+                } else if value < 100.0 {
+                    format!("{:.1}ms", value)
+                } else if value < 1000.0 {
+                    format!("{:.0}ms", value)
+                } else {
+                    let value = value / 1000.0;
+                    format!("{:.0}s", value)
+                }
+            })),
 
             hold_amt: FloatParam::new(
                 "Hold Amount",
@@ -224,35 +300,53 @@ impl Default for Limit2zeroParams {
                 FloatRange::Skewed {
                     min: 0.0,
                     max: 3000.,
-                    factor: 0.375,
+                    factor: 0.25,
                 },
             )
-            .with_unit("ms")
-            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            .with_value_to_string(Arc::new(move |value| {
+                if value < 1.0 {
+                    format!("{} samples", (value * 48.0).ceil() as usize)
+                } else if value < 10.0 {
+                    format!("{:.2}ms", value)
+                } else if value < 100.0 {
+                    format!("{:.1}ms", value)
+                } else if value < 1000.0 {
+                    format!("{:.0}ms", value)
+                } else {
+                    let value = value / 1000.0;
+                    format!("{:.2}s", value)
+                }
+            })),
 
-            atk_bend: FloatParam::new(
-                "Attack Bend",
-                0.0,
-                FloatRange::Skewed {
-                    min: 0.25, // 0.5:-6 0.25:-12
-                    max: 8.0,  // 2:6 4:12 8:18 16:24
-                    factor: FloatRange::gain_skew_factor(-12.0, 18.0),
-                },
+            rel_linearity: FloatParam::new(
+                "Release Linearity",
+                1.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
             rel_bend: FloatParam::new(
-                "Release bend",
-                0.0,
-                FloatRange::Skewed {
-                    min: 0.25, // 0.5:-6 0.25:-12
-                    max: 8.0,  // 2:6 4:12 8:18 16:24
-                    factor: FloatRange::gain_skew_factor(-12.0, 18.0),
-                },
+                "Release Bend Direction",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
             )
-            .with_unit("%")
-            .with_value_to_string(formatters::v2s_f32_percentage(0)),
+            .with_value_to_string(Arc::new(move |value| {
+                let value = 100.0 * (value * 2.0 - 1.0);
+                let s = 100.0 - value.abs();
+                if value < 0.0 {
+                    format!("S{:.0} : I{:.0}", s, value.abs())
+                } else {
+                    format!("S{:.0} : O{:.0}", s, value.abs())
+                }
+            })),
+
+            rel_bend_power: FloatParam::new(
+                "Release Bend Power",
+                2.0,
+                FloatRange::Linear { min: 2.0, max: 6.0 },
+            )
+            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
 
             stereo_link: FloatParam::new(
                 "Stereo Link",
@@ -265,6 +359,11 @@ impl Default for Limit2zeroParams {
             compensate: BoolParam::new("Gain Compensation", false),
         }
     }
+}
+
+fn round_to_nearest(value: f32, interval: f32) -> f32 {
+    let recip = interval.recip();
+    (value * recip).round() / recip
 }
 
 impl Plugin for Limit2zero {
@@ -309,6 +408,7 @@ impl Plugin for Limit2zero {
         self.sample_rate = buffer_config.sample_rate;
         self.channels = channels;
         self.limiters = LimiterBuffer::new(channels, lookahead_len);
+
         true
     }
 
@@ -325,21 +425,39 @@ impl Plugin for Limit2zero {
     ) -> ProcessStatus {
         let (input, trim) = (self.params.drive.value(), self.params.trim.value());
 
-        let (lookahead, atk_amt, atk_bend) = (
+        let (lookahead, atk_linearity, atk_amt, atk_bend_dir, atk_bend_power) = (
             self.params.lookahead.value() * 0.001 * self.sample_rate,
+            self.params.atk_linearity.value(),
             self.params.attack_amt.value(),
             self.params.atk_bend.value(),
+            self.params.atk_bend_power.value(),
         );
+
+        let atk_bend_power = 2_f32.powf(if atk_bend_power < 5.0 {
+            atk_bend_power
+        } else {
+            let factor = 2.0 * (atk_bend_power - 5.0).powi(2);
+            atk_bend_power + factor
+        });
 
         let (hold, hold_amt) = (
             self.params.hold.value() * 0.001 * self.sample_rate,
             self.params.hold_amt.value(),
         );
 
-        let (release, rel_bend) = (
+        let (release, rel_linearity, rel_bend_dir, rel_bend_power) = (
             self.params.release.value() * 0.001 * self.sample_rate,
+            self.params.rel_linearity.value(),
             self.params.rel_bend.value(),
+            self.params.rel_bend_power.value(),
         );
+
+        let rel_bend_power = 2_f32.powf(if rel_bend_power < 5.0 {
+            rel_bend_power
+        } else {
+            let factor = 2.0 * (rel_bend_power - 5.0).powi(2);
+            rel_bend_power + factor
+        });
 
         let stereo_link = self.params.stereo_link.value();
 
@@ -406,7 +524,7 @@ impl Plugin for Limit2zero {
                             *limiter.envelope = *limiter.hold;
                         }
                         *elapsed += 1.0;
-                        if *elapsed >= hold {
+                        if *elapsed >= (hold + 1.0) {
                             if release.round() >= 1.0 {
                                 *limiter.state = EnvState::Release(0.0);
                             } else {
@@ -420,10 +538,11 @@ impl Plugin for Limit2zero {
                             *limiter.envelope = *limiter.hold;
                         }
                         *elapsed += 1.0;
-                        let t = *elapsed / release;
-                        *limiter.envelope = lerp(*limiter.target, 0.0, t.powf(rel_bend));
+                        let t = *elapsed / (release + 1.0);
+                        let bent_t = calc_bend(rel_linearity, rel_bend_dir, rel_bend_power, t);
+                        *limiter.envelope = lerp(*limiter.target, 0.0, bent_t);
 
-                        if *elapsed >= release {
+                        if *elapsed >= (release + 1.0) {
                             *limiter.state = EnvState::Off;
                         }
                     }
@@ -446,15 +565,16 @@ impl Plugin for Limit2zero {
                     let p_factor = p.factor();
                     if p_factor > peak_factor {
                         peak = *p;
-                        peak_factor = p_factor
+                        peak_factor = p_factor;
                     }
                     p.index += 1;
                 }
 
                 // calculate atk envelope
                 if peak.db > 0.0 {
-                    let t = peak.index_f32() / self.lookahead_len;
-                    let atk_env = lerp(0.0, -1.0 * peak.db, t.powf(atk_bend)) * atk_amt;
+                    let t = (peak.index_f32() + 1.0) / (self.lookahead_len + 1.0);
+                    let bent_t = calc_bend(atk_linearity, atk_bend_dir, atk_bend_power, t);
+                    let atk_env = lerp(0.0, -1.0 * peak.db, bent_t) * atk_amt;
 
                     if atk_env < *limiter.envelope {
                         *limiter.target = atk_env;
@@ -516,6 +636,14 @@ impl Plugin for Limit2zero {
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+fn calc_bend(linearity: f32, bend: f32, power: f32, t: f32) -> f32 {
+    let bend_in = t.powf(power);
+    let bend_out = 1.0 - (1.0 - t).powf(power);
+    let s = lerp(bend_in, bend_out, bend);
+
+    lerp(s, t, linearity)
 }
 
 impl ClapPlugin for Limit2zero {
