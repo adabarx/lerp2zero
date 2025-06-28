@@ -1,6 +1,11 @@
 use core::f32;
 use nih_plug::prelude::*;
 use std::{collections::VecDeque, sync::Arc};
+use util::gain_to_db;
+
+mod easing;
+
+use easing::{Ease, EaseIn, EaseOut, Linear, LinearBlend, SCurve};
 
 struct Limit2zero {
     params: Arc<Limit2zeroParams>,
@@ -44,32 +49,80 @@ struct Limit2zeroParams {
     #[id = "attack_amt"]
     pub attack_amt: FloatParam,
 
-    #[id = "atk_linearity"]
-    pub atk_linearity: FloatParam,
+    #[id = "atk_env_linearity"]
+    pub atk_env_linearity: FloatParam,
 
-    #[id = "atk_bend"]
-    pub atk_bend: FloatParam,
+    #[id = "atk_env_s_center"]
+    pub atk_env_center: FloatParam,
 
-    #[id = "atk_bend_power"]
-    pub atk_bend_power: FloatParam,
+    #[id = "atk_env_polarity_in"]
+    pub atk_env_polarity_in: FloatParam,
+
+    #[id = "atk_env_polarity_out"]
+    pub atk_env_polarity_out: FloatParam,
+
+    #[id = "atk_env_power_in"]
+    pub atk_env_power_in: FloatParam,
+
+    #[id = "atk_env_power_out"]
+    pub atk_env_power_out: FloatParam,
+
+    #[id = "atk_smooth_amt"]
+    pub atk_smooth_amt: FloatParam,
+
+    #[id = "atk_env_smooth_polarity_in"]
+    pub atk_env_smooth_polarity_in: FloatParam,
+
+    #[id = "atk_env_smooth_polarity_out"]
+    pub atk_env_smooth_polarity_out: FloatParam,
+
+    #[id = "atk_env_smooth_power_in"]
+    pub atk_env_smooth_power_in: FloatParam,
+
+    #[id = "atk_env_smooth_power_out"]
+    pub atk_env_smooth_power_out: FloatParam,
 
     #[id = "hold"]
     pub hold: FloatParam,
 
-    #[id = "hold_amt"]
-    pub hold_amt: FloatParam,
-
     #[id = "release"]
     pub release: FloatParam,
 
+    #[id = "release_amt"]
+    pub release_amt: FloatParam,
+
     #[id = "rel_linearity"]
-    pub rel_linearity: FloatParam,
+    pub rel_env_linearity: FloatParam,
 
-    #[id = "rel_bend"]
-    pub rel_bend: FloatParam,
+    #[id = "rel_env_s_center"]
+    pub rel_env_center: FloatParam,
 
-    #[id = "rel_bend_power"]
-    pub rel_bend_power: FloatParam,
+    #[id = "rel_env_polarity_in"]
+    pub rel_env_polarity_in: FloatParam,
+
+    #[id = "rel_env_polarity_out"]
+    pub rel_env_polarity_out: FloatParam,
+
+    #[id = "rel_env_power_in"]
+    pub rel_env_power_in: FloatParam,
+
+    #[id = "rel_env_power_out"]
+    pub rel_env_power_out: FloatParam,
+
+    #[id = "rel_smooth_amt"]
+    pub rel_smooth_amt: FloatParam,
+
+    #[id = "rel_env_smooth_polarity_in"]
+    pub rel_env_smooth_polarity_in: FloatParam,
+
+    #[id = "rel_env_smooth_polarity_out"]
+    pub rel_env_smooth_polarity_out: FloatParam,
+
+    #[id = "rel_env_smooth_power_in"]
+    pub rel_env_smooth_power_in: FloatParam,
+
+    #[id = "rel_env_smooth_power_out"]
+    pub rel_env_smooth_power_out: FloatParam,
 
     #[id = "stereo_link"]
     pub stereo_link: FloatParam,
@@ -214,7 +267,7 @@ impl Default for Limit2zeroParams {
             )
             .with_value_to_string(Arc::new(move |value| {
                 if value <= 4.0 {
-                    let value = 2_f32.powf(value);
+                    let value = value.exp2();
                     if value < 10.0 {
                         format!("{:.1}:1", value)
                     } else {
@@ -222,7 +275,7 @@ impl Default for Limit2zeroParams {
                     }
                 } else {
                     let diff = (value - 4.0).powi(3);
-                    let value = 2_f32.powf(value + diff);
+                    let value = (value + diff).exp2();
 
                     if value > 50.0 {
                         format!("inf:1")
@@ -232,7 +285,7 @@ impl Default for Limit2zeroParams {
                 }
             })),
 
-            atk_linearity: FloatParam::new(
+            atk_env_linearity: FloatParam::new(
                 "Attack Linearity",
                 1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
@@ -240,25 +293,111 @@ impl Default for Limit2zeroParams {
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
-            atk_bend: FloatParam::new(
-                "Attack Bend Direction",
+            atk_env_polarity_in: FloatParam::new(
+                "Attack Polarity In",
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+            atk_env_polarity_out: FloatParam::new(
+                "Attack Polarity Out",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+
+            atk_env_power_in: FloatParam::new(
+                "Attack Power In",
+                2.0,
+                FloatRange::Skewed {
+                    min: 16_f32.recip(),
+                    max: 16.0,
+                    factor: 0.25,
+                },
             )
             .with_value_to_string(Arc::new(move |value| {
-                let value = 100.0 * (value * 2.0 - 1.0);
-                let s = 100.0 - value.abs();
-                if value < 0.0 {
-                    format!("S{:.0} : I{:.0}", s, value.abs())
+                let one_over_value = value.recip();
+                if one_over_value.round() > 1.0 {
+                    if one_over_value >= 10.0 {
+                        format!("1/{:.0}", one_over_value)
+                    } else {
+                        format!("1/{:.1}", one_over_value)
+                    }
                 } else {
-                    format!("S{:.0} : O{:.0}", s, value.abs())
+                    if value >= 10.0 {
+                        format!("1/{:.0}", value)
+                    } else {
+                        format!("1/{:.1}", value)
+                    }
                 }
             })),
 
-            atk_bend_power: FloatParam::new(
-                "Attack Bend Power",
+            atk_env_power_out: FloatParam::new(
+                "Attack Power Out",
                 2.0,
-                FloatRange::Linear { min: 2.0, max: 6.0 },
+                FloatRange::Skewed {
+                    min: 6_f32.recip(),
+                    max: 6.0,
+                    factor: 0.25,
+                },
+            )
+            .with_value_to_string(Arc::new(move |value| {
+                let one_over_value = value.recip();
+                if one_over_value.round() > 1.0 {
+                    if one_over_value >= 10.0 {
+                        format!("1/{:.0}", one_over_value)
+                    } else {
+                        format!("1/{:.1}", one_over_value)
+                    }
+                } else {
+                    if value >= 10.0 {
+                        format!("1/{:.0}", value)
+                    } else {
+                        format!("1/{:.1}", value)
+                    }
+                }
+            })),
+
+            atk_env_center: FloatParam::new(
+                "Atk S Center",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 0.5 },
+            ),
+
+            atk_smooth_amt: FloatParam::new(
+                "Attack Smooth Amount",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+
+            atk_env_smooth_polarity_in: FloatParam::new(
+                "Attack Polarity In",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+            atk_env_smooth_polarity_out: FloatParam::new(
+                "Attack Polarity Out",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+
+            atk_env_smooth_power_in: FloatParam::new(
+                "Attack Power In",
+                2.0,
+                FloatRange::Skewed {
+                    min: 6_f32.recip(),
+                    max: 6.0,
+                    factor: 0.25,
+                },
+            )
+            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+
+            atk_env_smooth_power_out: FloatParam::new(
+                "Attack Power Out",
+                2.0,
+                FloatRange::Skewed {
+                    min: 6_f32.recip(),
+                    max: 6.0,
+                    factor: 0.25,
+                },
             )
             .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
 
@@ -286,7 +425,7 @@ impl Default for Limit2zeroParams {
                 }
             })),
 
-            hold_amt: FloatParam::new(
+            release_amt: FloatParam::new(
                 "Hold Amount",
                 1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
@@ -318,33 +457,89 @@ impl Default for Limit2zeroParams {
                 }
             })),
 
-            rel_linearity: FloatParam::new(
-                "Release Linearity",
+            rel_env_linearity: FloatParam::new(
+                "Attack Linearity",
                 1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
-            rel_bend: FloatParam::new(
-                "Release Bend Direction",
+            rel_env_polarity_in: FloatParam::new(
+                "Attack Polarity In",
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_value_to_string(Arc::new(move |value| {
-                let value = 100.0 * (value * 2.0 - 1.0);
-                let s = 100.0 - value.abs();
-                if value < 0.0 {
-                    format!("S{:.0} : I{:.0}", s, value.abs())
-                } else {
-                    format!("S{:.0} : O{:.0}", s, value.abs())
-                }
-            })),
+            ),
+            rel_env_polarity_out: FloatParam::new(
+                "Attack Polarity Out",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
 
-            rel_bend_power: FloatParam::new(
-                "Release Bend Power",
+            rel_env_power_in: FloatParam::new(
+                "Attack Power In",
                 2.0,
-                FloatRange::Linear { min: 2.0, max: 6.0 },
+                FloatRange::Skewed {
+                    min: 6_f32.recip(),
+                    max: 6.0,
+                    factor: 0.25,
+                },
+            )
+            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+
+            rel_env_power_out: FloatParam::new(
+                "Attack Power Out",
+                2.0,
+                FloatRange::Skewed {
+                    min: 6_f32.recip(),
+                    max: 6.0,
+                    factor: 0.25,
+                },
+            )
+            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+
+            rel_env_center: FloatParam::new(
+                "rel S Center",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 0.5 },
+            ),
+
+            rel_smooth_amt: FloatParam::new(
+                "Attack Smooth Amount",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+
+            rel_env_smooth_polarity_in: FloatParam::new(
+                "Attack Polarity In",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+            rel_env_smooth_polarity_out: FloatParam::new(
+                "Attack Polarity Out",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+
+            rel_env_smooth_power_in: FloatParam::new(
+                "Attack Power In",
+                2.0,
+                FloatRange::Skewed {
+                    min: 6_f32.recip(),
+                    max: 6.0,
+                    factor: 0.25,
+                },
+            )
+            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+
+            rel_env_smooth_power_out: FloatParam::new(
+                "Attack Power Out",
+                2.0,
+                FloatRange::Skewed {
+                    min: 6_f32.recip(),
+                    max: 6.0,
+                    factor: 0.25,
+                },
             )
             .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
 
@@ -359,6 +554,38 @@ impl Default for Limit2zeroParams {
             compensate: BoolParam::new("Gain Compensation", false),
         }
     }
+}
+
+fn build_envelope(
+    linearity: f32,
+    center: f32,
+    smooth_amount: f32,
+    pol_i: f32,
+    pol_o: f32,
+    pow_i: f32,
+    pow_o: f32,
+    sm_pol_i: f32,
+    sm_pol_o: f32,
+    sm_pow_i: f32,
+    sm_pow_o: f32,
+) -> LinearBlend<SCurve<SCurve<Linear>>> {
+    let linear_smoothing_factor = 0.25 * (1.0 - smooth_amount) * linearity;
+    LinearBlend::new(
+        SCurve::new(
+            EaseIn::new(pol_i, pow_i),
+            EaseOut::new(pol_o, pow_o),
+            center,
+            smooth_amount + linear_smoothing_factor,
+            SCurve::new(
+                EaseIn::new(sm_pol_i, sm_pow_i),
+                EaseOut::new(sm_pol_o, sm_pow_o),
+                0.5,
+                linearity.powi(2),
+                Linear,
+            ),
+        ),
+        linearity,
+    )
 }
 
 impl Plugin for Limit2zero {
@@ -418,41 +645,46 @@ impl Plugin for Limit2zero {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let (input, trim) = (self.params.drive.value(), self.params.trim.value());
-
-        let (lookahead, atk_linearity, atk_amt, atk_bend_dir, atk_bend_power) = (
-            self.params.lookahead.value() * 0.001 * self.sample_rate,
-            self.params.atk_linearity.value(),
-            self.params.attack_amt.value(),
-            self.params.atk_bend.value(),
-            self.params.atk_bend_power.value(),
+        let atk_env = build_envelope(
+            self.params.atk_env_linearity.value(),
+            self.params.atk_env_center.value(),
+            self.params.atk_smooth_amt.value(),
+            self.params.atk_env_polarity_in.value(),
+            self.params.atk_env_polarity_out.value(),
+            self.params.atk_env_power_in.value(),
+            self.params.atk_env_power_out.value(),
+            self.params.atk_env_smooth_polarity_in.value(),
+            self.params.atk_env_smooth_polarity_out.value(),
+            self.params.atk_env_smooth_power_in.value(),
+            self.params.atk_env_smooth_power_out.value(),
+        );
+        let rel_env = build_envelope(
+            self.params.rel_env_linearity.value(),
+            self.params.rel_env_center.value(),
+            self.params.rel_smooth_amt.value(),
+            self.params.rel_env_polarity_in.value(),
+            self.params.rel_env_polarity_out.value(),
+            self.params.rel_env_power_in.value(),
+            self.params.rel_env_power_out.value(),
+            self.params.rel_env_smooth_polarity_in.value(),
+            self.params.rel_env_smooth_polarity_out.value(),
+            self.params.rel_env_smooth_power_in.value(),
+            self.params.rel_env_smooth_power_out.value(),
         );
 
-        let atk_bend_power = 2_f32.powf(if atk_bend_power < 5.0 {
-            atk_bend_power
-        } else {
-            let factor = 2.0 * (atk_bend_power - 5.0).powi(2);
-            atk_bend_power + factor
-        });
+        let (input, trim) = (self.params.drive.value(), self.params.trim.value());
+
+        let (lookahead, atk_amt) = (
+            self.params.lookahead.value() * 0.001 * self.sample_rate,
+            self.params.attack_amt.value(),
+        );
 
         let (hold, hold_amt) = (
             self.params.hold.value() * 0.001 * self.sample_rate,
-            self.params.hold_amt.value(),
+            self.params.release_amt.value(),
         );
 
-        let (release, rel_linearity, rel_bend_dir, rel_bend_power) = (
-            self.params.release.value() * 0.001 * self.sample_rate,
-            self.params.rel_linearity.value(),
-            self.params.rel_bend.value(),
-            self.params.rel_bend_power.value(),
-        );
-
-        let rel_bend_power = 2_f32.powf(if rel_bend_power < 5.0 {
-            rel_bend_power
-        } else {
-            let factor = 2.0 * (rel_bend_power - 5.0).powi(2);
-            rel_bend_power + factor
-        });
+        let release = self.params.release.value() * 0.001 * self.sample_rate;
 
         let stereo_link = self.params.stereo_link.value();
 
@@ -534,8 +766,7 @@ impl Plugin for Limit2zero {
                         }
                         *elapsed += 1.0;
                         let t = *elapsed / (release + 1.0);
-                        let bent_t = calc_bend(rel_linearity, rel_bend_dir, rel_bend_power, t);
-                        *limiter.envelope = lerp(*limiter.target, 0.0, bent_t);
+                        *limiter.envelope = lerp(*limiter.target, 0.0, rel_env.process(t));
 
                         if *elapsed >= (release + 1.0) {
                             *limiter.state = EnvState::Off;
@@ -568,8 +799,7 @@ impl Plugin for Limit2zero {
                 // calculate atk envelope
                 if peak.db > 0.0 {
                     let t = (peak.index_f32() + 1.0) / (self.lookahead_len + 1.0);
-                    let bent_t = calc_bend(atk_linearity, atk_bend_dir, atk_bend_power, t);
-                    let atk_env = lerp(0.0, -1.0 * peak.db, bent_t) * atk_amt;
+                    let atk_env = lerp(0.0, -1.0 * peak.db, atk_env.process(t)) * atk_amt;
 
                     if atk_env < *limiter.envelope {
                         *limiter.target = atk_env;
@@ -631,14 +861,6 @@ impl Plugin for Limit2zero {
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
-}
-
-fn calc_bend(linearity: f32, bend: f32, power: f32, t: f32) -> f32 {
-    let bend_in = t.powf(power);
-    let bend_out = 1.0 - (1.0 - t).powf(power);
-    let s = lerp(bend_in, bend_out, bend);
-
-    lerp(s, t, linearity)
 }
 
 impl ClapPlugin for Limit2zero {
