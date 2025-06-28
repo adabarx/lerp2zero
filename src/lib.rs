@@ -1,7 +1,6 @@
 use core::f32;
 use nih_plug::prelude::*;
 use std::{collections::VecDeque, sync::Arc};
-use util::gain_to_db;
 
 mod easing;
 
@@ -45,6 +44,9 @@ struct Limit2zeroParams {
 
     #[id = "lookahead"]
     pub lookahead: FloatParam,
+
+    #[id = "lookahead_accuracy"]
+    pub lookahead_accuracy: IntParam,
 
     #[id = "attack_amt"]
     pub attack_amt: FloatParam,
@@ -146,36 +148,57 @@ impl Default for Limit2zero {
 struct LimiterBuffer {
     channels: usize,
     buffers: Vec<VecDeque<SampleDB>>,
-    peaks: Vec<VecDeque<Peak>>,
     state: Vec<EnvState>,
     target: Vec<f32>,
     hold: Vec<f32>,
     envelope: Vec<f32>,
+    current_peaks: CurrentPeaks,
 }
 
-#[derive(Clone, Copy)]
-struct Peak {
-    db: f32,
-    index: isize,
+struct CurrentPeaks {
+    db: Vec<f32>,
+    position: Vec<f32>,
+    lerp_len: Vec<f32>,
 }
 
-impl Peak {
-    fn factor(&self) -> f32 {
-        self.index as f32 * self.db
+struct CurrentPeakSingleMut<'a> {
+    db: &'a mut f32,
+    position: &'a mut f32,
+    lerp_len: &'a mut f32,
+}
+
+impl CurrentPeaks {
+    fn get_mut(&mut self, channel: usize) -> CurrentPeakSingleMut<'_> {
+        if channel >= self.db.len() {
+            panic!("outta bounds");
+        }
+        CurrentPeakSingleMut {
+            db: self.db.get_mut(channel).unwrap(),
+            position: self.position.get_mut(channel).unwrap(),
+            lerp_len: self.lerp_len.get_mut(channel).unwrap(),
+        }
     }
+}
 
-    fn index_f32(&self) -> f32 {
-        self.index as f32
+impl<'a> CurrentPeakSingleMut<'a> {
+    fn read(&mut self, ease: impl Ease) -> Option<f32> {
+        *self.position += 1.0;
+        let progress = (*self.position + 1.0) / (*self.lerp_len + 1.0);
+        if progress > 1.0 {
+            *self.position -= 1.0;
+            return None;
+        }
+        Some(calc_atk_reduction(*self.db, ease.process(progress)))
     }
 }
 
 struct Limiter<'a> {
     buffer: &'a mut VecDeque<SampleDB>,
-    peaks: &'a mut VecDeque<Peak>,
     state: &'a mut EnvState,
     target: &'a mut f32,
     hold: &'a mut f32,
     envelope: &'a mut f32,
+    current_peak: CurrentPeakSingleMut<'a>,
 }
 
 impl LimiterBuffer {
@@ -183,11 +206,15 @@ impl LimiterBuffer {
         let mut rv = LimiterBuffer {
             channels,
             buffers: vec![VecDeque::with_capacity(sample_len); channels],
-            peaks: vec![VecDeque::with_capacity(sample_len); channels],
             state: vec![EnvState::Off; channels],
             target: vec![0.0; channels],
             hold: vec![0.0; channels],
             envelope: vec![0.0; channels],
+            current_peaks: CurrentPeaks {
+                db: vec![0.0; channels],
+                position: vec![2.0; channels],
+                lerp_len: vec![1.0; channels],
+            },
         };
 
         for b in rv.buffers.iter_mut() {
@@ -206,11 +233,11 @@ impl LimiterBuffer {
         let channel = channel.clamp(0, self.channels - 1);
         Limiter {
             buffer: self.buffers.get_mut(channel).unwrap(),
-            peaks: self.peaks.get_mut(channel).unwrap(),
             state: self.state.get_mut(channel).unwrap(),
             target: self.target.get_mut(channel).unwrap(),
             hold: self.hold.get_mut(channel).unwrap(),
             envelope: self.envelope.get_mut(channel).unwrap(),
+            current_peak: self.current_peaks.get_mut(channel),
         }
     }
 }
@@ -248,8 +275,8 @@ impl Default for Limit2zeroParams {
                 0.0,
                 FloatRange::Skewed {
                     min: 0.0,
-                    max: 10.0,
-                    factor: 0.75,
+                    max: 50.0,
+                    factor: 0.5,
                 },
             )
             .with_value_to_string(Arc::new(move |value| {
@@ -258,6 +285,17 @@ impl Default for Limit2zeroParams {
                 } else {
                     format!("{:.1}ms", value)
                 }
+            })),
+
+            lookahead_accuracy: IntParam::new(
+                "Lookahead Accuracy",
+                1,
+                IntRange::Linear { min: 1, max: 16 },
+            )
+            .with_value_to_string(Arc::new(move |value| match value {
+                1 => "every sample".to_string(),
+                2 => "every other sample".to_string(),
+                _ => format!("every {} samples", value),
             })),
 
             attack_amt: FloatParam::new(
@@ -679,7 +717,7 @@ impl Plugin for Limit2zero {
             self.params.attack_amt.value(),
         );
 
-        let (hold, hold_amt) = (
+        let (hold, release_amt) = (
             self.params.hold.value() * 0.001 * self.sample_rate,
             self.params.release_amt.value(),
         );
@@ -734,13 +772,6 @@ impl Plugin for Limit2zero {
                     db: util::gain_to_db_fast(sample.abs() * input),
                 };
 
-                if new_sample.peak() {
-                    limiter.peaks.push_back(Peak {
-                        db: new_sample.db,
-                        index: 0,
-                    });
-                }
-
                 limiter.buffer.push_back(new_sample);
 
                 // do stuff based on envelope state
@@ -766,6 +797,8 @@ impl Plugin for Limit2zero {
                         }
                         *elapsed += 1.0;
                         let t = *elapsed / (release + 1.0);
+
+                        // NOTE: calc_rel_reduction
                         *limiter.envelope = lerp(*limiter.target, 0.0, rel_env.process(t));
 
                         if *elapsed >= (release + 1.0) {
@@ -784,47 +817,62 @@ impl Plugin for Limit2zero {
                     }
                 }
 
-                let mut peak = Peak { db: 0.0, index: 0 };
-                let mut peak_factor = 0.0;
+                // search buffer for peaks and calc atk env
+                // or
+                // calculate atk envelope using the last known peak
+                let la_acc = self.params.lookahead_accuracy.value();
+                let mut atk_reduction = 0.0;
+                if self.lookahead_len >= 1.0 && sample_id as i32 % la_acc == 0 {
+                    let mut db = 0.0;
+                    let mut position = 0.0;
+                    let mut curr_reduct = 0.0;
 
-                for p in limiter.peaks.iter_mut() {
-                    let p_factor = p.factor();
-                    if p_factor > peak_factor {
-                        peak = *p;
-                        peak_factor = p_factor;
+                    for (i, sample) in limiter
+                        .buffer
+                        .iter()
+                        .rev()
+                        .enumerate()
+                        .filter(|x| x.1.peak())
+                    {
+                        let t = atk_env.process((i + 1) as f32 / (self.lookahead_len + 1.0));
+                        let reduct = calc_atk_reduction(sample.db, t);
+                        if reduct < curr_reduct {
+                            curr_reduct = reduct;
+                            db = sample.db;
+                            position = i as f32;
+                        }
                     }
-                    p.index += 1;
+                    if db > 0.0 {
+                        *limiter.current_peak.db = db;
+                        *limiter.current_peak.position = position;
+                        *limiter.current_peak.lerp_len = self.lookahead_len;
+                        atk_reduction = curr_reduct * atk_amt;
+                    }
+                } else if let Some(reduction) = limiter.current_peak.read(atk_env) {
+                    atk_reduction = reduction * atk_amt;
                 }
 
-                // calculate atk envelope
-                if peak.db > 0.0 {
-                    let t = (peak.index_f32() + 1.0) / (self.lookahead_len + 1.0);
-                    let atk_env = lerp(0.0, -1.0 * peak.db, atk_env.process(t)) * atk_amt;
-
-                    if atk_env < *limiter.envelope {
-                        *limiter.target = atk_env;
-                        *limiter.hold = atk_env * hold_amt.sqrt();
-                        *limiter.envelope = atk_env;
-                        if hold.round() >= 1.0 {
-                            *limiter.state = EnvState::Hold(0.0);
-                        } else if release.round() >= 1.0 {
-                            *limiter.state = EnvState::Release(0.0);
-                        } else {
-                            *limiter.state = EnvState::Off;
-                        }
+                if atk_reduction < *limiter.envelope {
+                    *limiter.target = atk_reduction;
+                    *limiter.hold = atk_reduction * release_amt.sqrt();
+                    *limiter.envelope = atk_reduction;
+                    if hold.round() >= 1.0 {
+                        *limiter.state = EnvState::Hold(0.0);
+                    } else if release.round() >= 1.0 {
+                        *limiter.state = EnvState::Release(0.0);
+                    } else {
+                        *limiter.state = EnvState::Off;
                     }
                 }
 
                 // grab delayed sample from buffer
                 let delay = limiter.buffer.pop_front().unwrap();
 
-                if delay.peak() {
-                    let _ = limiter.peaks.pop_front().unwrap();
-                }
-
+                // if the sample is still over 0.0 after the envelope is applied,
+                // clip it.
                 if delay.db + *limiter.envelope > 0.0 {
                     *limiter.target = -1.0 * delay.db;
-                    *limiter.hold = *limiter.target * hold_amt.sqrt();
+                    *limiter.hold = *limiter.target * release_amt.sqrt();
                     *limiter.envelope = *limiter.target;
                     if hold.round() >= 1.0 {
                         *limiter.state = EnvState::Hold(0.0);
@@ -861,6 +909,10 @@ impl Plugin for Limit2zero {
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+fn calc_atk_reduction(db: f32, t: f32) -> f32 {
+    lerp(0.0, -1.0 * db, t)
 }
 
 impl ClapPlugin for Limit2zero {
