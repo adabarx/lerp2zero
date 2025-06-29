@@ -1,8 +1,10 @@
 use core::f32;
 use nih_plug::prelude::*;
+use nih_plug_vizia::ViziaState;
 use std::{collections::VecDeque, sync::Arc};
 
 mod easing;
+mod editor;
 
 use easing::{Ease, EaseIn, EaseOut, Linear, LinearBlend, SCurve};
 
@@ -36,6 +38,9 @@ enum EnvState {
 
 #[derive(Params)]
 struct Limit2zeroParams {
+    #[persist = "editor-state"]
+    editor_state: Arc<ViziaState>,
+
     #[id = "drive"]
     pub drive: FloatParam,
 
@@ -73,16 +78,16 @@ struct Limit2zeroParams {
     pub atk_smooth_amt: FloatParam,
 
     #[id = "atk_env_smooth_polarity_in"]
-    pub atk_env_smooth_polarity_in: FloatParam,
+    pub atk_env_sm_polarity_in: FloatParam,
 
     #[id = "atk_env_smooth_polarity_out"]
-    pub atk_env_smooth_polarity_out: FloatParam,
+    pub atk_env_sm_polarity_out: FloatParam,
 
     #[id = "atk_env_smooth_power_in"]
-    pub atk_env_smooth_power_in: FloatParam,
+    pub atk_env_sm_power_in: FloatParam,
 
     #[id = "atk_env_smooth_power_out"]
-    pub atk_env_smooth_power_out: FloatParam,
+    pub atk_env_sm_power_out: FloatParam,
 
     #[id = "hold"]
     pub hold: FloatParam,
@@ -115,16 +120,16 @@ struct Limit2zeroParams {
     pub rel_smooth_amt: FloatParam,
 
     #[id = "rel_env_smooth_polarity_in"]
-    pub rel_env_smooth_polarity_in: FloatParam,
+    pub rel_env_sm_polarity_in: FloatParam,
 
     #[id = "rel_env_smooth_polarity_out"]
-    pub rel_env_smooth_polarity_out: FloatParam,
+    pub rel_env_sm_polarity_out: FloatParam,
 
     #[id = "rel_env_smooth_power_in"]
-    pub rel_env_smooth_power_in: FloatParam,
+    pub rel_env_sm_power_in: FloatParam,
 
     #[id = "rel_env_smooth_power_out"]
-    pub rel_env_smooth_power_out: FloatParam,
+    pub rel_env_sm_power_out: FloatParam,
 
     #[id = "stereo_link"]
     pub stereo_link: FloatParam,
@@ -245,6 +250,8 @@ impl LimiterBuffer {
 impl Default for Limit2zeroParams {
     fn default() -> Self {
         Self {
+            editor_state: editor::default_state(),
+
             drive: FloatParam::new(
                 "Drive",
                 util::db_to_gain(0.0),
@@ -406,18 +413,18 @@ impl Default for Limit2zeroParams {
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
-            atk_env_smooth_polarity_in: FloatParam::new(
+            atk_env_sm_polarity_in: FloatParam::new(
                 "Attack Polarity In",
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
-            atk_env_smooth_polarity_out: FloatParam::new(
+            atk_env_sm_polarity_out: FloatParam::new(
                 "Attack Polarity Out",
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
-            atk_env_smooth_power_in: FloatParam::new(
+            atk_env_sm_power_in: FloatParam::new(
                 "Attack Power In",
                 2.0,
                 FloatRange::Skewed {
@@ -428,7 +435,7 @@ impl Default for Limit2zeroParams {
             )
             .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
 
-            atk_env_smooth_power_out: FloatParam::new(
+            atk_env_sm_power_out: FloatParam::new(
                 "Attack Power Out",
                 2.0,
                 FloatRange::Skewed {
@@ -548,18 +555,18 @@ impl Default for Limit2zeroParams {
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
-            rel_env_smooth_polarity_in: FloatParam::new(
+            rel_env_sm_polarity_in: FloatParam::new(
                 "Attack Polarity In",
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
-            rel_env_smooth_polarity_out: FloatParam::new(
+            rel_env_sm_polarity_out: FloatParam::new(
                 "Attack Polarity Out",
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
-            rel_env_smooth_power_in: FloatParam::new(
+            rel_env_sm_power_in: FloatParam::new(
                 "Attack Power In",
                 2.0,
                 FloatRange::Skewed {
@@ -570,7 +577,7 @@ impl Default for Limit2zeroParams {
             )
             .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
 
-            rel_env_smooth_power_out: FloatParam::new(
+            rel_env_sm_power_out: FloatParam::new(
                 "Attack Power Out",
                 2.0,
                 FloatRange::Skewed {
@@ -656,6 +663,10 @@ impl Plugin for Limit2zero {
         self.params.clone()
     }
 
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(self.params.clone(), self.params.editor_state.clone())
+    }
+
     fn initialize(
         &mut self,
         audio_io_layout: &AudioIOLayout,
@@ -691,10 +702,10 @@ impl Plugin for Limit2zero {
             self.params.atk_env_polarity_out.value(),
             self.params.atk_env_power_in.value(),
             self.params.atk_env_power_out.value(),
-            self.params.atk_env_smooth_polarity_in.value(),
-            self.params.atk_env_smooth_polarity_out.value(),
-            self.params.atk_env_smooth_power_in.value(),
-            self.params.atk_env_smooth_power_out.value(),
+            self.params.atk_env_sm_polarity_in.value(),
+            self.params.atk_env_sm_polarity_out.value(),
+            self.params.atk_env_sm_power_in.value(),
+            self.params.atk_env_sm_power_out.value(),
         );
         let rel_env = build_envelope(
             self.params.rel_env_linearity.value(),
@@ -704,10 +715,10 @@ impl Plugin for Limit2zero {
             self.params.rel_env_polarity_out.value(),
             self.params.rel_env_power_in.value(),
             self.params.rel_env_power_out.value(),
-            self.params.rel_env_smooth_polarity_in.value(),
-            self.params.rel_env_smooth_polarity_out.value(),
-            self.params.rel_env_smooth_power_in.value(),
-            self.params.rel_env_smooth_power_out.value(),
+            self.params.rel_env_sm_polarity_in.value(),
+            self.params.rel_env_sm_polarity_out.value(),
+            self.params.rel_env_sm_power_in.value(),
+            self.params.rel_env_sm_power_out.value(),
         );
 
         let (input, trim) = (self.params.drive.value(), self.params.trim.value());
