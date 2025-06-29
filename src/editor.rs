@@ -32,7 +32,7 @@ pub(crate) fn create(
         .build(cx);
 
         VStack::new(cx, |cx| {
-            Label::new(cx, "Gain GUI")
+            Label::new(cx, "Clip2Zero")
                 .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
                 .font_weight(FontWeightKeyword::Thin)
                 .font_size(30.0)
@@ -40,9 +40,12 @@ pub(crate) fn create(
                 .child_top(Stretch(1.0))
                 .child_bottom(Pixels(0.0));
 
-            Label::new(cx, "Drive");
-            ParamSlider::new(cx, Data::params, |params| &params.drive);
             HStack::new(cx, |cx| {
+                VStack::new(cx, |cx| {
+                    Label::new(cx, "Drive");
+                    ParamSlider::new(cx, Data::params, |params| &params.drive);
+                });
+
                 VStack::new(cx, |cx| {
                     Label::new(cx, "lookahead");
                     ParamSlider::new(cx, Data::params, |params| &params.lookahead);
@@ -103,18 +106,15 @@ pub(crate) fn create(
                     Label::new(cx, "rel_env_sm_polarity_out");
                     ParamSlider::new(cx, Data::params, |params| &params.rel_env_sm_polarity_out);
                 });
+                VStack::new(cx, |cx| {
+                    Label::new(cx, "stereo_link");
+                    ParamSlider::new(cx, Data::params, |params| &params.stereo_link);
+                    Label::new(cx, "trim");
+                    ParamSlider::new(cx, Data::params, |params| &params.trim);
+                    ParamButton::new(cx, Data::params, |params| &params.compensate);
+                });
             });
-            Label::new(cx, "compensate");
-            ParamSlider::new(cx, Data::params, |params| &params.compensate);
-            Label::new(cx, "stereo_link");
-            ParamSlider::new(cx, Data::params, |params| &params.stereo_link);
-            Label::new(cx, "trim");
-            ParamSlider::new(cx, Data::params, |params| &params.trim);
-        })
-        .width(Pixels(800.0))
-        .row_between(Pixels(0.0))
-        .child_left(Stretch(1.0))
-        .child_right(Stretch(1.0));
+        });
 
         ResizeHandle::new(cx);
     })
