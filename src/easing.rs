@@ -110,13 +110,13 @@ impl Ease for EaseOut {
     fn process(&self, x: f32) -> f32 {
         let p = self.polarity.clamp(0.0, 1.0);
         if p == 1.0 {
-            1.0 - (1.0 - x).powf(self.power.recip())
+            1.0 - (1.0 - x).powf(self.power)
         } else if p == 0.0 {
-            x.powf(self.power)
+            x.powf(self.power.recip())
         } else {
             lerp(
-                x.powf(self.power),
-                1.0 - (1.0 - x).powf(self.power.recip()),
+                x.powf(self.power.recip()),
+                1.0 - (1.0 - x).powf(self.power),
                 x,
             )
         }
@@ -139,13 +139,13 @@ impl Ease for EaseIn {
     fn process(&self, x: f32) -> f32 {
         let p = self.polarity.clamp(0.0, 1.0);
         if p == 1.0 {
-            x.powf(self.power.recip())
+            x.powf(self.power)
         } else if p == 0.0 {
-            1.0 - (1.0 - x).powf(self.power)
+            1.0 - (1.0 - x).powf(self.power.recip())
         } else {
             lerp(
-                1.0 - (1.0 - x).powf(self.power),
-                x.powf(self.power.recip()),
+                1.0 - (1.0 - x).powf(self.power.recip()),
+                x.powf(self.power),
                 x,
             )
         }

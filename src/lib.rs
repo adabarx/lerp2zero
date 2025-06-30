@@ -368,9 +368,9 @@ impl Default for Limit2zeroParams {
                     }
                 } else {
                     if value >= 10.0 {
-                        format!("1/{:.0}", value)
+                        format!("{:.0}", value)
                     } else {
-                        format!("1/{:.1}", value)
+                        format!("{:.1}", value)
                     }
                 }
             })),
@@ -379,8 +379,8 @@ impl Default for Limit2zeroParams {
                 "Attack Power Out",
                 2.0,
                 FloatRange::Skewed {
-                    min: 6_f32.recip(),
-                    max: 6.0,
+                    min: 16_f32.recip(),
+                    max: 16.0,
                     factor: 0.25,
                 },
             )
@@ -394,9 +394,9 @@ impl Default for Limit2zeroParams {
                     }
                 } else {
                     if value >= 10.0 {
-                        format!("1/{:.0}", value)
+                        format!("{:.0}", value)
                     } else {
-                        format!("1/{:.1}", value)
+                        format!("{:.1}", value)
                     }
                 }
             })),
@@ -404,7 +404,7 @@ impl Default for Limit2zeroParams {
             atk_env_center: FloatParam::new(
                 "Atk S Center",
                 0.5,
-                FloatRange::Linear { min: 0.0, max: 0.5 },
+                FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
             atk_smooth_amt: FloatParam::new(
@@ -525,28 +525,58 @@ impl Default for Limit2zeroParams {
                 "Attack Power In",
                 2.0,
                 FloatRange::Skewed {
-                    min: 6_f32.recip(),
-                    max: 6.0,
+                    min: 16_f32.recip(),
+                    max: 16.0,
                     factor: 0.25,
                 },
             )
-            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+            .with_value_to_string(Arc::new(move |value| {
+                let one_over_value = value.recip();
+                if one_over_value.round() > 1.0 {
+                    if one_over_value >= 10.0 {
+                        format!("1/{:.0}", one_over_value)
+                    } else {
+                        format!("1/{:.1}", one_over_value)
+                    }
+                } else {
+                    if value >= 10.0 {
+                        format!("{:.0}", value)
+                    } else {
+                        format!("{:.1}", value)
+                    }
+                }
+            })),
 
             rel_env_power_out: FloatParam::new(
                 "Attack Power Out",
                 2.0,
                 FloatRange::Skewed {
-                    min: 6_f32.recip(),
-                    max: 6.0,
+                    min: 16_f32.recip(),
+                    max: 16.0,
                     factor: 0.25,
                 },
             )
-            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+            .with_value_to_string(Arc::new(move |value| {
+                let one_over_value = value.recip();
+                if one_over_value.round() > 1.0 {
+                    if one_over_value >= 10.0 {
+                        format!("1/{:.0}", one_over_value)
+                    } else {
+                        format!("1/{:.1}", one_over_value)
+                    }
+                } else {
+                    if value >= 10.0 {
+                        format!("{:.0}", value)
+                    } else {
+                        format!("{:.1}", value)
+                    }
+                }
+            })),
 
             rel_env_center: FloatParam::new(
                 "rel S Center",
                 0.5,
-                FloatRange::Linear { min: 0.0, max: 0.5 },
+                FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
             rel_smooth_amt: FloatParam::new(
