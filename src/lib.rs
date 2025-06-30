@@ -1,6 +1,8 @@
+use atomic_float::AtomicF32;
 use core::f32;
 use nih_plug::prelude::*;
 use nih_plug_vizia::ViziaState;
+use std::sync::atomic::Ordering;
 use std::{collections::VecDeque, sync::Arc};
 
 mod easing;
@@ -14,6 +16,10 @@ struct Limit2zero {
     sample_rate: f32,
     channels: usize,
     limiters: LimiterBuffer,
+    gui_msg_timer: usize,
+    gui_pre_gain: [Arc<AtomicF32>; 2],
+    gui_post_gain: [Arc<AtomicF32>; 2],
+    gui_reduction: [Arc<AtomicF32>; 2],
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -146,6 +152,19 @@ impl Default for Limit2zero {
             channels: 2,
             lookahead_len: 0.0,
             limiters: LimiterBuffer::new(2, 256),
+            gui_msg_timer: 0,
+            gui_pre_gain: [
+                Arc::new(AtomicF32::default()),
+                Arc::new(AtomicF32::default()),
+            ],
+            gui_post_gain: [
+                Arc::new(AtomicF32::default()),
+                Arc::new(AtomicF32::default()),
+            ],
+            gui_reduction: [
+                Arc::new(AtomicF32::default()),
+                Arc::new(AtomicF32::default()),
+            ],
         }
     }
 }
@@ -723,6 +742,34 @@ fn build_envelope(
     )
 }
 
+#[derive(Default, Debug, Clone, Copy)]
+struct EditorMsg {
+    pre: [f32; 2],
+    post: [f32; 2],
+    gr: [f32; 2],
+}
+
+impl EditorMsg {
+    fn add_pre(&mut self, db: f32, channel: usize) {
+        if channel >= 2 {
+            panic!("outta bounds")
+        }
+        self.pre[channel] = self.pre[channel].max(db);
+    }
+    fn add_post(&mut self, db: f32, channel: usize) {
+        if channel >= 2 {
+            panic!("outta bounds")
+        }
+        self.post[channel] = self.post[channel].max(db);
+    }
+    fn add_gr(&mut self, db: f32, channel: usize) {
+        if channel >= 2 {
+            panic!("outta bounds")
+        }
+        self.gr[channel] = self.gr[channel].max(db);
+    }
+}
+
 impl Plugin for Limit2zero {
     const NAME: &'static str = "limit2zero";
     const VENDOR: &'static str = "Adamina Barx";
@@ -754,7 +801,13 @@ impl Plugin for Limit2zero {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone(), self.params.editor_state.clone())
+        editor::create(
+            self.params.clone(),
+            self.gui_pre_gain.clone(),
+            self.gui_post_gain.clone(),
+            self.gui_pre_gain.clone(),
+            self.params.editor_state.clone(),
+        )
     }
 
     fn initialize(
@@ -837,12 +890,12 @@ impl Plugin for Limit2zero {
         }
 
         struct Samples {
-            samples: Vec<f32>,
+            samples: Vec<SampleDB>,
             reductions: Vec<f32>,
         }
 
         impl Samples {
-            fn add(&mut self, sample: f32, reduction: f32) {
+            fn add(&mut self, sample: SampleDB, reduction: f32) {
                 self.samples.push(sample);
                 self.reductions.push(reduction);
             }
@@ -986,7 +1039,7 @@ impl Plugin for Limit2zero {
 
                 most_reduction = f32::min(most_reduction, *limiter.envelope);
 
-                rv_samples.add(delay.sample, *limiter.envelope);
+                rv_samples.add(delay, *limiter.envelope);
             }
 
             let compensation = if self.params.compensate.value() {
@@ -995,13 +1048,34 @@ impl Plugin for Limit2zero {
                 0.0
             };
 
-            for (i, s) in rv_samples.samples.iter().enumerate() {
+            for (i, sample_pre) in rv_samples.samples.iter().enumerate() {
                 let channel = raw_buffer.get_mut(i).unwrap();
                 let reduce = rv_samples.reductions.get(i).unwrap();
                 let reduce = lerp(*reduce, most_reduction, stereo_link);
 
                 *channel.get_mut(sample_id).unwrap() =
-                    s * util::db_to_gain_fast(reduce + trim + compensation)
+                    sample_pre.sample * util::db_to_gain_fast(reduce + trim + compensation);
+                let post_db = sample_pre.db + reduce;
+
+                if self.params.editor_state.is_open() {
+                    // send editor highest samples 120 times every second
+                    let editor_msg_freq = self.sample_rate.ceil() as usize / 120;
+                    let mut editor_msg = EditorMsg::default();
+
+                    editor_msg.add_pre(sample_pre.db, i);
+                    editor_msg.add_post(post_db, i);
+                    editor_msg.add_gr(reduce, i);
+
+                    if self.gui_msg_timer % editor_msg_freq == 0 {
+                        self.gui_pre_gain[i].fetch_max(editor_msg.pre[i], Ordering::Relaxed);
+                        self.gui_post_gain[i].fetch_max(editor_msg.post[i], Ordering::Relaxed);
+                        self.gui_reduction[i].fetch_max(editor_msg.gr[i], Ordering::Relaxed);
+                        self.gui_msg_timer = 0;
+                    }
+                    self.gui_msg_timer += 1;
+                } else if self.gui_msg_timer != 0 {
+                    self.gui_msg_timer = 0;
+                }
             }
         }
         ProcessStatus::Normal
