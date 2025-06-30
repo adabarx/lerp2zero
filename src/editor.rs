@@ -67,12 +67,22 @@ impl View for FunctionGraph {
         let bounds = cx.bounds();
         let wh = f32::min(bounds.h, bounds.w);
 
+        let (x_offset, y_offset) = if wh < bounds.h {
+            let crest = bounds.h - wh;
+            (0.0, crest / 2.0)
+        } else if wh < bounds.w {
+            let crest = bounds.w - wh;
+            (crest / 2.0, 0.0)
+        } else {
+            (0.0, 0.0)
+        };
+
         let mut path = Path::new();
         for (i, (x, y)) in points.iter().enumerate() {
             let mut px = x * wh;
             let mut py = wh - (y * wh);
-            px += bounds.x;
-            py += bounds.y;
+            px += bounds.x + x_offset;
+            py += bounds.y + y_offset;
             if i == 0 {
                 path.move_to(px, py);
             } else {
@@ -179,125 +189,161 @@ pub(crate) fn create(
                     ParamSlider::new(cx, GUIData::params, |params| &params.stereo_link);
                     Label::new(cx, "trim");
                     ParamSlider::new(cx, GUIData::params, |params| &params.trim);
-                });
-
-                ScrollView::new(cx, 0.0, 0.0, false, true, |cx| {
-                    VStack::new(cx, |cx| {
+                })
+                .width(Percentage(25.0));
+                VStack::new(cx, |cx| {
+                    HStack::new(cx, |cx| {
                         FunctionGraph::Attack
                             .build(cx, |_| {})
                             .width(Stretch(1.0))
-                            .height(Pixels(100.0));
-                        Label::new(cx, "lookahead");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.lookahead)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "lookahead_accuracy");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.lookahead_accuracy)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "attack_amt");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.attack_amt)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_linearity");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.atk_env_linearity)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_center");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.atk_env_center)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_power_in");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.atk_env_power_in)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_power_out");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.atk_env_power_out)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_polarity_in");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.atk_env_polarity_in)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_polarity_out");
-                        ParamSlider::new(cx, GUIData::params, |params| {
-                            &params.atk_env_polarity_out
-                        })
-                        .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_smooth_amt");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.atk_smooth_amt)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_sm_power_in");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.atk_env_sm_power_in)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_sm_power_out");
-                        ParamSlider::new(cx, GUIData::params, |params| {
-                            &params.atk_env_sm_power_out
-                        })
-                        .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_sm_polarity_in");
-                        ParamSlider::new(cx, GUIData::params, |params| {
-                            &params.atk_env_sm_polarity_in
-                        })
-                        .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "atk_env_sm_polarity_out");
-                        ParamSlider::new(cx, GUIData::params, |params| {
-                            &params.atk_env_sm_polarity_out
-                        })
-                        .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                    })
-                    .height(Auto);
-                });
-                ScrollView::new(cx, 0.0, 0.0, false, true, |cx| {
-                    VStack::new(cx, |cx| {
+                            .height(Stretch(1.0));
                         FunctionGraph::Release
                             .build(cx, |_| {})
                             .width(Stretch(1.0))
-                            .height(Pixels(100.0));
-
-                        Label::new(cx, "hold");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.hold)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "release");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.release)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "release_amt");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.release_amt)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_linearity");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.rel_env_linearity)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_center");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.rel_env_center)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_power_in");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.rel_env_power_in)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_power_out");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.rel_env_power_out)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_polarity_in");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.rel_env_polarity_in)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_polarity_out");
-                        ParamSlider::new(cx, GUIData::params, |params| {
-                            &params.rel_env_polarity_out
-                        })
-                        .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_smooth_amt");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.rel_smooth_amt)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_sm_power_in");
-                        ParamSlider::new(cx, GUIData::params, |params| &params.rel_env_sm_power_in)
-                            .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_sm_power_out");
-                        ParamSlider::new(cx, GUIData::params, |params| {
-                            &params.rel_env_sm_power_out
-                        })
-                        .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_sm_polarity_in");
-                        ParamSlider::new(cx, GUIData::params, |params| {
-                            &params.rel_env_sm_polarity_in
-                        })
-                        .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
-                        Label::new(cx, "rel_env_sm_polarity_out");
-                        ParamSlider::new(cx, GUIData::params, |params| {
-                            &params.rel_env_sm_polarity_out
-                        });
+                            .height(Stretch(1.0));
                     })
-                    .height(Auto);
+                    .height(Percentage(25.0));
+                    HStack::new(cx, |cx| {
+                        ScrollView::new(cx, 0.0, 0.0, false, true, |cx| {
+                            VStack::new(cx, |cx| {
+                                Label::new(cx, "lookahead");
+                                ParamSlider::new(cx, GUIData::params, |params| &params.lookahead)
+                                    .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "lookahead_accuracy");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.lookahead_accuracy
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "attack_amt");
+                                ParamSlider::new(cx, GUIData::params, |params| &params.attack_amt)
+                                    .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_linearity");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_linearity
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_center");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_center
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_power_in");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_power_in
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_power_out");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_power_out
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_polarity_in");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_polarity_in
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_polarity_out");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_polarity_out
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_smooth_amt");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_smooth_amt
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_sm_power_in");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_sm_power_in
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_sm_power_out");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_sm_power_out
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_sm_polarity_in");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_sm_polarity_in
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "atk_env_sm_polarity_out");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.atk_env_sm_polarity_out
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                            })
+                            .height(Auto);
+                        });
+                        ScrollView::new(cx, 0.0, 0.0, false, true, |cx| {
+                            VStack::new(cx, |cx| {
+                                Label::new(cx, "hold");
+                                ParamSlider::new(cx, GUIData::params, |params| &params.hold)
+                                    .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "release");
+                                ParamSlider::new(cx, GUIData::params, |params| &params.release)
+                                    .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "release_amt");
+                                ParamSlider::new(cx, GUIData::params, |params| &params.release_amt)
+                                    .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_linearity");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_linearity
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_center");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_center
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_power_in");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_power_in
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_power_out");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_power_out
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_polarity_in");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_polarity_in
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_polarity_out");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_polarity_out
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_smooth_amt");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_smooth_amt
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_sm_power_in");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_sm_power_in
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_sm_power_out");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_sm_power_out
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_sm_polarity_in");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_sm_polarity_in
+                                })
+                                .on_mouse_move(|cx, _, _| cx.emit(GUIEvent::UpdateGraphs));
+                                Label::new(cx, "rel_env_sm_polarity_out");
+                                ParamSlider::new(cx, GUIData::params, |params| {
+                                    &params.rel_env_sm_polarity_out
+                                });
+                            })
+                            .height(Auto);
+                        });
+                    });
                 });
             });
         });

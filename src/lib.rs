@@ -340,12 +340,12 @@ impl Default for Limit2zeroParams {
 
             atk_env_polarity_in: FloatParam::new(
                 "Attack Polarity In",
-                0.5,
+                1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
             atk_env_polarity_out: FloatParam::new(
                 "Attack Polarity Out",
-                0.5,
+                1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
@@ -414,37 +414,67 @@ impl Default for Limit2zeroParams {
             ),
 
             atk_env_sm_polarity_in: FloatParam::new(
-                "Attack Polarity In",
-                0.5,
+                "Attack Smooth Polarity In",
+                1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
             atk_env_sm_polarity_out: FloatParam::new(
-                "Attack Polarity Out",
-                0.5,
+                "Attack Smooth Polarity Out",
+                1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
             atk_env_sm_power_in: FloatParam::new(
-                "Attack Power In",
+                "Attack Smooth Power In",
                 2.0,
                 FloatRange::Skewed {
-                    min: 6_f32.recip(),
-                    max: 6.0,
+                    min: 16_f32.recip(),
+                    max: 16.0,
                     factor: 0.25,
                 },
             )
-            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+            .with_value_to_string(Arc::new(move |value| {
+                let one_over_value = value.recip();
+                if one_over_value.round() > 1.0 {
+                    if one_over_value >= 10.0 {
+                        format!("1/{:.0}", one_over_value)
+                    } else {
+                        format!("1/{:.1}", one_over_value)
+                    }
+                } else {
+                    if value >= 10.0 {
+                        format!("{:.0}", value)
+                    } else {
+                        format!("{:.1}", value)
+                    }
+                }
+            })),
 
             atk_env_sm_power_out: FloatParam::new(
-                "Attack Power Out",
+                "Attack Smooth Power Out",
                 2.0,
                 FloatRange::Skewed {
-                    min: 6_f32.recip(),
-                    max: 6.0,
+                    min: 16_f32.recip(),
+                    max: 16.0,
                     factor: 0.25,
                 },
             )
-            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+            .with_value_to_string(Arc::new(move |value| {
+                let one_over_value = value.recip();
+                if one_over_value.round() > 1.0 {
+                    if one_over_value >= 10.0 {
+                        format!("1/{:.0}", one_over_value)
+                    } else {
+                        format!("1/{:.1}", one_over_value)
+                    }
+                } else {
+                    if value >= 10.0 {
+                        format!("{:.0}", value)
+                    } else {
+                        format!("{:.1}", value)
+                    }
+                }
+            })),
 
             hold: FloatParam::new(
                 "Hold",
@@ -503,7 +533,7 @@ impl Default for Limit2zeroParams {
             })),
 
             rel_env_linearity: FloatParam::new(
-                "Attack Linearity",
+                "Release Linearity",
                 1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
@@ -511,18 +541,18 @@ impl Default for Limit2zeroParams {
             .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
             rel_env_polarity_in: FloatParam::new(
-                "Attack Polarity In",
-                0.5,
+                "Release Polarity In",
+                1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
             rel_env_polarity_out: FloatParam::new(
-                "Attack Polarity Out",
-                0.5,
+                "Release Polarity Out",
+                1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
             rel_env_power_in: FloatParam::new(
-                "Attack Power In",
+                "Release Power In",
                 2.0,
                 FloatRange::Skewed {
                     min: 16_f32.recip(),
@@ -548,7 +578,7 @@ impl Default for Limit2zeroParams {
             })),
 
             rel_env_power_out: FloatParam::new(
-                "Attack Power Out",
+                "Release Power Out",
                 2.0,
                 FloatRange::Skewed {
                     min: 16_f32.recip(),
@@ -580,43 +610,73 @@ impl Default for Limit2zeroParams {
             ),
 
             rel_smooth_amt: FloatParam::new(
-                "Attack Smooth Amount",
+                "Release Smooth Amount",
                 0.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
             rel_env_sm_polarity_in: FloatParam::new(
-                "Attack Polarity In",
-                0.5,
+                "Release Polarity In",
+                1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
             rel_env_sm_polarity_out: FloatParam::new(
-                "Attack Polarity Out",
-                0.5,
+                "Release Polarity Out",
+                1.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             ),
 
             rel_env_sm_power_in: FloatParam::new(
-                "Attack Power In",
+                "Release Smooth Power In",
                 2.0,
                 FloatRange::Skewed {
-                    min: 6_f32.recip(),
-                    max: 6.0,
+                    min: 16_f32.recip(),
+                    max: 16.0,
                     factor: 0.25,
                 },
             )
-            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+            .with_value_to_string(Arc::new(move |value| {
+                let one_over_value = value.recip();
+                if one_over_value.round() > 1.0 {
+                    if one_over_value >= 10.0 {
+                        format!("1/{:.0}", one_over_value)
+                    } else {
+                        format!("1/{:.1}", one_over_value)
+                    }
+                } else {
+                    if value >= 10.0 {
+                        format!("{:.0}", value)
+                    } else {
+                        format!("{:.1}", value)
+                    }
+                }
+            })),
 
             rel_env_sm_power_out: FloatParam::new(
-                "Attack Power Out",
+                "Release Smooth Power Out",
                 2.0,
                 FloatRange::Skewed {
-                    min: 6_f32.recip(),
-                    max: 6.0,
+                    min: 16_f32.recip(),
+                    max: 16.0,
                     factor: 0.25,
                 },
             )
-            .with_value_to_string(Arc::new(move |value| format!("{:.2}", value - 1.0))),
+            .with_value_to_string(Arc::new(move |value| {
+                let one_over_value = value.recip();
+                if one_over_value.round() > 1.0 {
+                    if one_over_value >= 10.0 {
+                        format!("1/{:.0}", one_over_value)
+                    } else {
+                        format!("1/{:.1}", one_over_value)
+                    }
+                } else {
+                    if value >= 10.0 {
+                        format!("{:.0}", value)
+                    } else {
+                        format!("{:.1}", value)
+                    }
+                }
+            })),
 
             stereo_link: FloatParam::new(
                 "Stereo Link",
@@ -644,7 +704,7 @@ fn build_envelope(
     sm_pow_i: f32,
     sm_pow_o: f32,
 ) -> LinearBlend<SCurve<SCurve<Linear>>> {
-    let linear_smoothing_factor = 0.25 * (1.0 - smooth_amount) * linearity;
+    let linear_smoothing_factor = (1.0 - smooth_amount) * linearity.powi(2);
     LinearBlend::new(
         SCurve::new(
             EaseIn::new(pol_i, pow_i),
@@ -655,7 +715,7 @@ fn build_envelope(
                 EaseIn::new(sm_pol_i, sm_pow_i),
                 EaseOut::new(sm_pol_o, sm_pow_o),
                 0.5,
-                linearity.powi(2),
+                0.25 * linearity.powi(2),
                 Linear,
             ),
         ),
